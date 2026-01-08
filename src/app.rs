@@ -14,7 +14,7 @@ pub struct LogLine {
 pub struct App {
     pub lines: Vec<LogLine>,
     pub filtered_indices: Vec<usize>,
-    pub scroll_offset: usize,
+    pub bottom_line_idx: usize,
     pub hide_input: String,
     pub hide_regex: Option<Regex>,
     pub hide_error: Option<String>,
@@ -46,7 +46,7 @@ impl App {
         Self {
             lines: Vec::new(),
             filtered_indices: Vec::new(),
-            scroll_offset: 0,
+            bottom_line_idx: 0,
             hide_input: String::new(),
             hide_regex: None,
             hide_error: None,
@@ -227,54 +227,50 @@ impl App {
                 self.filtered_indices.push(i);
             }
         }
-        self.scroll_offset = 0;
+        self.bottom_line_idx = 0;
     }
 
     pub fn clear(&mut self) {
         self.lines.clear();
         self.filtered_indices.clear();
-        self.scroll_offset = 0;
+        self.bottom_line_idx = 0;
         self.status_message = Some("Cleared".to_string());
     }
 
-    pub fn scroll_up(&mut self, amount: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    pub fn scroll_up(&mut self, amount: usize, _visible_height: usize) {
+        if self.follow_tail {
+            self.bottom_line_idx = self.filtered_indices.len().saturating_sub(1);
+        }
+        self.bottom_line_idx = self.bottom_line_idx.saturating_sub(amount);
         self.follow_tail = false;
     }
 
-    pub fn scroll_down(&mut self, amount: usize, visible_height: usize) {
-        let max_offset = self.filtered_indices.len().saturating_sub(visible_height);
-        self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
-        if self.scroll_offset >= max_offset {
+    pub fn scroll_down(&mut self, amount: usize, _visible_height: usize) {
+        let max_idx = self.filtered_indices.len().saturating_sub(1);
+        if self.follow_tail {
+            return;
+        }
+        self.bottom_line_idx = (self.bottom_line_idx + amount).min(max_idx);
+        if self.bottom_line_idx >= max_idx {
             self.follow_tail = true;
         }
     }
 
-    pub fn scroll_to_end(&mut self, visible_height: usize) {
-        let max_offset = self.filtered_indices.len().saturating_sub(visible_height);
-        self.scroll_offset = max_offset;
+    pub fn scroll_to_end(&mut self, _visible_height: usize) {
         self.follow_tail = true;
+        self.bottom_line_idx = self.filtered_indices.len().saturating_sub(1);
     }
 
-    pub fn scroll_to_start(&mut self) {
-        self.scroll_offset = 0;
+    pub fn scroll_to_start(&mut self, _visible_height: usize) {
+        self.bottom_line_idx = 0;
         self.follow_tail = false;
     }
 
-    pub fn get_visible_lines(&self, height: usize) -> Vec<(usize, &LogLine)> {
+    pub fn get_bottom_line_idx(&self) -> usize {
         if self.follow_tail {
-            let start = self.filtered_indices.len().saturating_sub(height);
-            self.filtered_indices[start..]
-                .iter()
-                .map(|&i| (i, &self.lines[i]))
-                .collect()
+            self.filtered_indices.len().saturating_sub(1)
         } else {
-            self.filtered_indices
-                .iter()
-                .skip(self.scroll_offset)
-                .take(height)
-                .map(|&i| (i, &self.lines[i]))
-                .collect()
+            self.bottom_line_idx.min(self.filtered_indices.len().saturating_sub(1))
         }
     }
 

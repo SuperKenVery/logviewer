@@ -152,27 +152,45 @@ fn draw_log_view(frame: &mut Frame, app: &App, area: Rect) {
         .title(title)
         .border_style(Style::default().fg(Color::Cyan));
 
-    if app.wrap_lines {
-        let prefix_width = if app.show_time { 9 + 9 } else { 9 };
-        let content_width = inner_width.saturating_sub(prefix_width);
-        let visible_lines = app.get_visible_lines(inner_height);
+    if app.filtered_indices.is_empty() {
+        let list = List::new(Vec::<ListItem>::new()).block(block);
+        frame.render_widget(list, area);
+        return;
+    }
 
-        let mut lines: Vec<Line> = Vec::new();
-        for (idx, line) in visible_lines {
-            let mut prefix_spans = Vec::new();
-            if app.show_time {
-                prefix_spans.push(Span::styled(
-                    format!("{} ", line.timestamp),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
+    let prefix_width = if app.show_time { 9 + 9 } else { 9 };
+    let content_width = inner_width.saturating_sub(prefix_width);
+    let bottom_idx = app.get_bottom_line_idx();
+
+    let mut collected_lines: Vec<Line> = Vec::new();
+    let mut current_filtered_idx = bottom_idx as i64;
+
+    while collected_lines.len() < inner_height && current_filtered_idx >= 0 {
+        let filtered_idx = current_filtered_idx as usize;
+        if filtered_idx >= app.filtered_indices.len() {
+            current_filtered_idx -= 1;
+            continue;
+        }
+        let line_idx = app.filtered_indices[filtered_idx];
+        let log_line = &app.lines[line_idx];
+
+        let mut prefix_spans = Vec::new();
+        if app.show_time {
             prefix_spans.push(Span::styled(
-                format!("{:>6} │ ", idx + 1),
+                format!("{} ", log_line.timestamp),
                 Style::default().fg(Color::DarkGray),
             ));
+        }
+        prefix_spans.push(Span::styled(
+            format!("{:>6} │ ", line_idx + 1),
+            Style::default().fg(Color::DarkGray),
+        ));
 
-            let highlighted = app.render_line(line);
+        let highlighted = app.render_line(log_line);
+
+        if app.wrap_lines && content_width > 0 {
             let wrapped = wrap_highlighted(&highlighted, content_width);
+            let mut line_group: Vec<Line> = Vec::new();
 
             for (i, wrap_line) in wrapped.into_iter().enumerate() {
                 let mut line_spans = Vec::new();
@@ -185,43 +203,30 @@ fn draw_log_view(frame: &mut Frame, app: &App, area: Rect) {
                     ));
                 }
                 line_spans.extend(wrap_line);
-                lines.push(Line::from(line_spans));
+                line_group.push(Line::from(line_spans));
             }
+
+            for line in line_group.into_iter().rev() {
+                collected_lines.push(line);
+                if collected_lines.len() >= inner_height {
+                    break;
+                }
+            }
+        } else {
+            let mut spans = prefix_spans;
+            for (text, style) in highlighted {
+                spans.push(Span::styled(text, style));
+            }
+            collected_lines.push(Line::from(spans));
         }
 
-        let para = Paragraph::new(lines).block(block);
-        frame.render_widget(para, area);
-    } else {
-        let visible_lines = app.get_visible_lines(inner_height);
-        let items: Vec<ListItem> = visible_lines
-            .iter()
-            .map(|(idx, line)| {
-                let mut spans = Vec::new();
-
-                if app.show_time {
-                    spans.push(Span::styled(
-                        format!("{} ", line.timestamp),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
-
-                spans.push(Span::styled(
-                    format!("{:>6} │ ", idx + 1),
-                    Style::default().fg(Color::DarkGray),
-                ));
-
-                let highlighted = app.render_line(line);
-                for (text, style) in highlighted {
-                    spans.push(Span::styled(text, style));
-                }
-
-                ListItem::new(Line::from(spans))
-            })
-            .collect();
-
-        let list = List::new(items).block(block);
-        frame.render_widget(list, area);
+        current_filtered_idx -= 1;
     }
+
+    collected_lines.reverse();
+
+    let para = Paragraph::new(collected_lines).block(block);
+    frame.render_widget(para, area);
 }
 
 fn wrap_highlighted(spans: &[(String, Style)], width: usize) -> Vec<Vec<Span<'static>>> {
