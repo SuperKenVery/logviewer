@@ -17,12 +17,15 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     pub bottom_line_idx: usize,
     pub hide_input: String,
+    pub hide_cursor: usize,
     pub hide_regex: Option<Regex>,
     pub hide_error: Option<String>,
     pub filter_input: String,
+    pub filter_cursor: usize,
     pub filter_expr: Option<FilterExpr>,
     pub filter_error: Option<String>,
     pub highlight_input: String,
+    pub highlight_cursor: usize,
     pub highlight_expr: Option<FilterExpr>,
     pub highlight_error: Option<String>,
     pub show_time: bool,
@@ -45,17 +48,23 @@ pub enum InputMode {
 impl App {
     pub fn new(source_rx: Receiver<SourceEvent>) -> Self {
         let state = AppState::load();
+        let hide_cursor = state.hide_input.chars().count();
+        let filter_cursor = state.filter_input.chars().count();
+        let highlight_cursor = state.highlight_input.chars().count();
         let mut app = Self {
             lines: Vec::new(),
             filtered_indices: Vec::new(),
             bottom_line_idx: 0,
             hide_input: state.hide_input,
+            hide_cursor,
             hide_regex: None,
             hide_error: None,
             filter_input: state.filter_input,
+            filter_cursor,
             filter_expr: None,
             filter_error: None,
             highlight_input: state.highlight_input,
+            highlight_cursor,
             highlight_expr: None,
             highlight_error: None,
             show_time: true,

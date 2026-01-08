@@ -120,9 +120,48 @@ fn run_app(
                             }
                         }
                         KeyCode::Esc => app.input_mode = InputMode::Normal,
-                        KeyCode::Char(c) => app.hide_input.push(c),
+                        KeyCode::Left => {
+                            app.hide_cursor = app.hide_cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            let len = app.hide_input.chars().count();
+                            if app.hide_cursor < len {
+                                app.hide_cursor += 1;
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.hide_cursor = 0;
+                        }
+                        KeyCode::End => {
+                            app.hide_cursor = app.hide_input.chars().count();
+                        }
+                        KeyCode::Char(c) => {
+                            let byte_idx = app.hide_input.char_indices()
+                                .nth(app.hide_cursor)
+                                .map(|(i, _)| i)
+                                .unwrap_or(app.hide_input.len());
+                            app.hide_input.insert(byte_idx, c);
+                            app.hide_cursor += 1;
+                        }
                         KeyCode::Backspace => {
-                            app.hide_input.pop();
+                            if app.hide_cursor > 0 {
+                                let byte_idx = app.hide_input.char_indices()
+                                    .nth(app.hide_cursor - 1)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(0);
+                                app.hide_input.remove(byte_idx);
+                                app.hide_cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            let len = app.hide_input.chars().count();
+                            if app.hide_cursor < len {
+                                let byte_idx = app.hide_input.char_indices()
+                                    .nth(app.hide_cursor)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(app.hide_input.len());
+                                app.hide_input.remove(byte_idx);
+                            }
                         }
                         _ => {}
                     },
@@ -134,9 +173,48 @@ fn run_app(
                             }
                         }
                         KeyCode::Esc => app.input_mode = InputMode::Normal,
-                        KeyCode::Char(c) => app.filter_input.push(c),
+                        KeyCode::Left => {
+                            app.filter_cursor = app.filter_cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            let len = app.filter_input.chars().count();
+                            if app.filter_cursor < len {
+                                app.filter_cursor += 1;
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.filter_cursor = 0;
+                        }
+                        KeyCode::End => {
+                            app.filter_cursor = app.filter_input.chars().count();
+                        }
+                        KeyCode::Char(c) => {
+                            let byte_idx = app.filter_input.char_indices()
+                                .nth(app.filter_cursor)
+                                .map(|(i, _)| i)
+                                .unwrap_or(app.filter_input.len());
+                            app.filter_input.insert(byte_idx, c);
+                            app.filter_cursor += 1;
+                        }
                         KeyCode::Backspace => {
-                            app.filter_input.pop();
+                            if app.filter_cursor > 0 {
+                                let byte_idx = app.filter_input.char_indices()
+                                    .nth(app.filter_cursor - 1)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(0);
+                                app.filter_input.remove(byte_idx);
+                                app.filter_cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            let len = app.filter_input.chars().count();
+                            if app.filter_cursor < len {
+                                let byte_idx = app.filter_input.char_indices()
+                                    .nth(app.filter_cursor)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(app.filter_input.len());
+                                app.filter_input.remove(byte_idx);
+                            }
                         }
                         _ => {}
                     },
@@ -148,9 +226,48 @@ fn run_app(
                             }
                         }
                         KeyCode::Esc => app.input_mode = InputMode::Normal,
-                        KeyCode::Char(c) => app.highlight_input.push(c),
+                        KeyCode::Left => {
+                            app.highlight_cursor = app.highlight_cursor.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            let len = app.highlight_input.chars().count();
+                            if app.highlight_cursor < len {
+                                app.highlight_cursor += 1;
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.highlight_cursor = 0;
+                        }
+                        KeyCode::End => {
+                            app.highlight_cursor = app.highlight_input.chars().count();
+                        }
+                        KeyCode::Char(c) => {
+                            let byte_idx = app.highlight_input.char_indices()
+                                .nth(app.highlight_cursor)
+                                .map(|(i, _)| i)
+                                .unwrap_or(app.highlight_input.len());
+                            app.highlight_input.insert(byte_idx, c);
+                            app.highlight_cursor += 1;
+                        }
                         KeyCode::Backspace => {
-                            app.highlight_input.pop();
+                            if app.highlight_cursor > 0 {
+                                let byte_idx = app.highlight_input.char_indices()
+                                    .nth(app.highlight_cursor - 1)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(0);
+                                app.highlight_input.remove(byte_idx);
+                                app.highlight_cursor -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            let len = app.highlight_input.chars().count();
+                            if app.highlight_cursor < len {
+                                let byte_idx = app.highlight_input.char_indices()
+                                    .nth(app.highlight_cursor)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(app.highlight_input.len());
+                                app.highlight_input.remove(byte_idx);
+                            }
                         }
                         _ => {}
                     },

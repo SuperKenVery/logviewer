@@ -60,7 +60,7 @@ fn draw_hide_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(input, area);
 
     if app.input_mode == InputMode::HideEdit {
-        frame.set_cursor_position((area.x + app.hide_input.len() as u16 + 1, area.y + 1));
+        frame.set_cursor_position((area.x + app.hide_cursor as u16 + 1, area.y + 1));
     }
 }
 
@@ -94,7 +94,7 @@ fn draw_filter_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(input, area);
 
     if app.input_mode == InputMode::FilterEdit {
-        frame.set_cursor_position((area.x + app.filter_input.len() as u16 + 1, area.y + 1));
+        frame.set_cursor_position((area.x + app.filter_cursor as u16 + 1, area.y + 1));
     }
 }
 
@@ -131,7 +131,7 @@ fn draw_highlight_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(input, area);
 
     if app.input_mode == InputMode::HighlightEdit {
-        frame.set_cursor_position((area.x + app.highlight_input.len() as u16 + 1, area.y + 1));
+        frame.set_cursor_position((area.x + app.highlight_cursor as u16 + 1, area.y + 1));
     }
 }
 
@@ -297,7 +297,7 @@ fn draw_help_popup(frame: &mut Frame) {
     };
 
     let help_text = vec![
-        Line::from("Enter: Apply | Esc: Cancel"),
+        Line::from("Enter: Apply | Esc: Cancel | ←→: Move cursor"),
         Line::from("Syntax: pattern && !pattern || pattern"),
         Line::from("Use quotes for special chars: \"a||b\""),
     ];
