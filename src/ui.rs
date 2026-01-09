@@ -32,6 +32,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_listen_popup() {
         draw_listen_popup(frame, app);
     }
+
+    if app.show_quit_confirm {
+        draw_quit_confirm(frame);
+    }
 }
 
 fn draw_hide_input(frame: &mut Frame, app: &App, area: Rect) {
@@ -280,10 +284,8 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         msg.clone()
     } else {
         format!(
-            "q:Quit d:Hide f:Filter h:Highlight c:Clear t:Time({}) s:Syntax({}) J:JSON({}) w:Wrap({})",
+            "q:Quit d:Hide f:Filter h:Highlight c:Clear t:Time({}) w:Wrap({})",
             if app.show_time { "ON" } else { "OFF" },
-            if app.heuristic_highlight { "ON" } else { "OFF" },
-            if app.json_highlight { "ON" } else { "OFF" },
             if app.wrap_lines { "ON" } else { "OFF" }
         )
     };
@@ -533,4 +535,37 @@ fn build_addr_line<'a>(
             }
         }
     }
+}
+
+fn draw_quit_confirm(frame: &mut Frame) {
+    let area = frame.area();
+    let popup_width = 40.min(area.width.saturating_sub(4));
+    let popup_height = 5.min(area.height.saturating_sub(4));
+
+    let popup_area = Rect {
+        x: area.width.saturating_sub(popup_width) / 2,
+        y: area.height.saturating_sub(popup_height) / 2,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Press 'y' to quit, any other key to cancel",
+            Style::default().fg(Color::White),
+        )),
+    ];
+
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Quit? ")
+                .border_style(Style::default().fg(Color::Red)),
+        )
+        .style(Style::default().bg(Color::Black));
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(popup, popup_area);
 }

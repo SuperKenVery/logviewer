@@ -105,11 +105,22 @@ fn run_app(
             if let Event::Key(key) = ev {
                 app.status_message = None;
 
+                if app.show_quit_confirm {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(()),
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+                            app.show_quit_confirm = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 if app.show_listen_popup() {
                     match key.code {
-                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Char('q') => app.show_quit_confirm = true,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            return Ok(())
+                            app.show_quit_confirm = true
                         }
                         KeyCode::Tab => app.toggle_listen_display_mode(),
                         KeyCode::Up | KeyCode::Char('k') => app.listen_select_prev(),
@@ -127,19 +138,17 @@ fn run_app(
 
                 match app.input_mode {
                     InputMode::Normal => match key.code {
-                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Char('q') => app.show_quit_confirm = true,
                         KeyCode::Char('c')
                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
-                            return Ok(())
+                            app.show_quit_confirm = true
                         }
                         KeyCode::Char('d') => app.input_mode = InputMode::HideEdit,
                         KeyCode::Char('f') => app.input_mode = InputMode::FilterEdit,
                         KeyCode::Char('h') => app.input_mode = InputMode::HighlightEdit,
                         KeyCode::Char('c') => app.clear(),
                         KeyCode::Char('t') => app.toggle_time(),
-                        KeyCode::Char('s') => app.toggle_heuristic(),
-                        KeyCode::Char('J') => app.toggle_json(),
                         KeyCode::Char('w') => app.toggle_wrap(),
                         KeyCode::Char('g') => app.scroll_to_start(visible_height),
                         KeyCode::Char('G') => app.scroll_to_end(visible_height),

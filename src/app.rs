@@ -31,8 +31,6 @@ pub struct App {
     pub highlight_expr: Option<FilterExpr>,
     pub highlight_error: Option<String>,
     pub show_time: bool,
-    pub heuristic_highlight: bool,
-    pub json_highlight: bool,
     pub wrap_lines: bool,
     pub input_mode: InputMode,
     pub follow_tail: bool,
@@ -45,6 +43,7 @@ pub struct App {
     pub listen_addr_list: Vec<ListenAddrEntry>,
     pub listen_selected_idx: usize,
     pub listen_popup_area: Option<(u16, u16, u16, u16)>,
+    pub show_quit_confirm: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -99,9 +98,7 @@ impl App {
             highlight_expr: None,
             highlight_error: None,
             show_time: true,
-            heuristic_highlight: true,
-            json_highlight: true,
-            wrap_lines: false,
+            wrap_lines: state.wrap_lines,
             input_mode: InputMode::Normal,
             follow_tail: true,
             source_rx,
@@ -113,6 +110,7 @@ impl App {
             listen_addr_list: Vec::new(),
             listen_selected_idx: 0,
             listen_popup_area: None,
+            show_quit_confirm: false,
         };
         app.apply_hide();
         app.apply_filter();
@@ -288,6 +286,7 @@ impl App {
             hide_input: self.hide_input.clone(),
             filter_input: self.filter_input.clone(),
             highlight_input: self.highlight_input.clone(),
+            wrap_lines: self.wrap_lines,
         };
         state.save();
     }
@@ -409,8 +408,8 @@ impl App {
         let spans = highlight_line(
             &content,
             self.highlight_expr.as_ref(),
-            self.heuristic_highlight,
-            self.json_highlight,
+            true,
+            true,
         );
         apply_highlights(&content, &spans)
     }
@@ -419,15 +418,8 @@ impl App {
         self.show_time = !self.show_time;
     }
 
-    pub fn toggle_heuristic(&mut self) {
-        self.heuristic_highlight = !self.heuristic_highlight;
-    }
-
-    pub fn toggle_json(&mut self) {
-        self.json_highlight = !self.json_highlight;
-    }
-
     pub fn toggle_wrap(&mut self) {
         self.wrap_lines = !self.wrap_lines;
+        self.save_state();
     }
 }

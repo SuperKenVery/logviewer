@@ -84,7 +84,7 @@ pub fn highlight_line(
         }
     }
 
-    if heuristic_enabled && spans.is_empty() {
+    if heuristic_enabled {
         for rule in HEURISTIC_RULES.iter() {
             for m in rule.regex.find_iter(text) {
                 spans.push(Span {
