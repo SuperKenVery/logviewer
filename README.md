@@ -14,7 +14,9 @@ Screenshot: viewing `Cargo.lock` in this app
 
 ## Installation
 
-Coming soon. For now, please run from source.
+```bash
+cargo binstall logviewer
+```
 
 ## Usage
 
