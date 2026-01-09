@@ -12,7 +12,7 @@ bin-dir = "{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [features]
-default = []
+default = ["gui"]
 gui = ["dioxus", "dioxus-native", "async-std"]
 
 [dependencies]
