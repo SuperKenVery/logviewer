@@ -1,93 +1,199 @@
 {
-  description = "Build a cargo project without extra checks";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-
+    rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
+    systems.url = "github:nix-systems/default";
 
-    flake-utils.url = "github:numtide/flake-utils";
-
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    nix-github-actions.url = "github:nix-community/nix-github-actions";
+    nix-github-actions.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      crane,
-      flake-utils,
-      rust-overlay,
-      ...
-    }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ (import rust-overlay) ];
+  outputs = {
+    self,
+    systems,
+    nixpkgs,
+    nix-github-actions,
+    crane,
+    ...
+  } @ inputs: let
+    eachSystem = f:
+      nixpkgs.lib.genAttrs (import systems) (
+        system:
+          f (import nixpkgs {
+            inherit system;
+            overlays = [inputs.rust-overlay.overlays.default];
+          })
+      );
+
+    rustToolchain = eachSystem (pkgs: pkgs.rust-bin.stable.latest.default.override {
+      extensions = ["rust-src" "rust-analyzer"];
+      targets = ["wasm32-unknown-unknown"];
+    });
+
+    dioxus-cli = eachSystem (pkgs: pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
+      # postPatch = ''
+      #   rm Cargo.lock
+      #   cp ${./Dioxus.lock} Cargo.lock
+      # '';
+
+      # cargoDeps = pkgs.rustPlatform.importCargoLock {
+      #   lockFile = ./Dioxus.lock;
+      # };
+    }));
+
+    cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+
+    wasmBindgen = eachSystem (pkgs: (pkgs.lib.findFirst
+      (pkg: pkg.name == "wasm-bindgen")
+      (throw "Could not find wasm-bindgen package")
+      cargoLock.package));
+
+    wasm-bindgen-cli = eachSystem (pkgs: (pkgs.buildWasmBindgenCli rec {
+      src = pkgs.fetchCrate {
+        pname = "wasm-bindgen-cli";
+        version = wasmBindgen.${pkgs.stdenv.hostPlatform.system}.version;
+        hash = "sha256-M6WuGl7EruNopHZbqBpucu4RWz44/MSdv6f0zkYw+44=";
+      };
+      cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+        inherit src;
+        inherit (src) pname version;
+        hash = "sha256-ElDatyOwdKwHg3bNH/1pcxKI7LXkhsotlDPQjiLHBwA=";
+      };
+    }));
+
+
+
+  in rec {
+    devShells = eachSystem (pkgs: {
+      # Based on a discussion at https://github.com/oxalica/rust-overlay/issues/129
+      default = pkgs.mkShell (with pkgs; {
+        nativeBuildInputs = [
+          # Use mold when we are runnning in Linux
+          (lib.optionals stdenv.isLinux mold)
+          sqlite
+          darwin.sigtool
+          binaryen
+        ];
+
+        buildInputs = [
+          rustToolchain.${pkgs.stdenv.hostPlatform.system}
+          cargo
+          dioxus-cli.${pkgs.stdenv.hostPlatform.system}
+          wasm-bindgen-cli.${pkgs.stdenv.hostPlatform.system}
+          nodejs
+          lld
+        ] ++
+        (pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+          openssl
+          pkg-config
+        ])) ++
+        (pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
+          apple-sdk_15
+        ]));
+
+        # RUST_SRC_PATH = "${
+        #   rustToolchain.${pkgs.stdenv.hostPlatform.system}.rust-src
+        # }/lib/rustlib/src/rust/library";
+        RUST_BACKTRACE = "1";
+        RUST_LOG = "debug";
+      });
+    });
+
+    packages = eachSystem(pkgs: rec {
+      server = let
+        system = pkgs.stdenv.hostPlatform.system;
+        craneLib = crane.mkLib pkgs;
+        assets = pkgs.runCommand "assets" { } ''
+            mkdir -p $out
+            cd assets/
+            npx tailwind -o $out/tailwind_output.css
+          '';
+        commonArgs = rec {
+          src = (pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = manifestFilter;
+            name = "source";
+          });
+          # src = builtins.trace src1.outPath src1;
+
+          nativeBuildInputs = devShells.${system}.default.nativeBuildInputs;
+          buildInputs = devShells.${system}.default.buildInputs;
+        };
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        # Keep all source and /assets for building this crate
+        sourceFilter = path: type:
+            (craneLib.filterCargoSources path type)
+            || (builtins.match ".*assets/.*" path != null);
+        # Only keep Cargo.toml and Cargo.lock, for building dependencies
+        manifestFilter = path: type:
+            (craneLib.filterCargoSources path type)
+            || (builtins.match ".*/Cargo\\..*" path != null);
+        tailwind-assets = pkgs.buildNpmPackage {
+          name = "tailwind-assets";
+          src = ./assets;
+
+          npmDepsHash = "sha256-HRMLzN2s0CKjHXx23MAL4EURhzHhpb6gtSsocva6q8s=";
+
+          # Override the build command to generate the specific file you need
+          # Adjust 'input.css' to whatever your source css file is named
+          buildPhase = ''
+            npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css
+          '';
+
+          installPhase = ''
+            mkdir -p $out
+            cp tailwind_output.css $out/
+          '';
         };
 
-        craneLib = (crane.mkLib pkgs).overrideToolchain (
-          p:
-          p.rust-bin.stable.latest.default.override {
-            extensions = ["rust-analyzer" "clippy"];
-          }
-        );
+        in craneLib.buildPackage (
+          commonArgs // {
+            inherit cargoArtifacts;
 
+            src = (pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter = sourceFilter;
+              name = "source";
+            });
 
-        # Common arguments can be set here to avoid repeating them later
-        # Note: changes here will rebuild all dependency crates
-        commonArgs = {
-          src = craneLib.cleanCargoSource ./.;
-          strictDeps = true;
+            buildPhase = ''
+              cp ${tailwind-assets}/tailwind_output.css assets/tailwind_output.css
+              export CARGO_HOME=$cargoVendorDir
 
-          buildInputs = [
-            # Add additional build inputs here
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            # Additional darwin specific inputs can be set here
-            pkgs.libiconv
-          ];
+              dx bundle --release
+            '';
+
+            installPhaseCommand = ''
+              mkdir -p $out/
+              cp -r ./target/dx/nju-schedule-ics/release/web/* $out/
+            '';
+        });
+      docker = pkgs.dockerTools.buildImage {
+        name = "nju-schedule-ics";
+        config = {
+          Cmd = [ "${server}/nju-schedule-ics" ];
         };
+      };
+    });
 
-        my-crate = craneLib.buildPackage (
-          commonArgs
-          // {
-            cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-
-            # Additional environment variables or build phases/hooks can be set
-            # here *without* rebuilding all dependency crates
-            # MY_CUSTOM_VAR = "some value";
-          }
-        );
-      in
-      {
-        checks = {
-          inherit my-crate;
-        };
-
-        packages.default = my-crate;
-
-        apps.default = flake-utils.lib.mkApp {
-          drv = my-crate;
-        };
-
-        devShells.default = craneLib.devShell {
-          # Inherit inputs from checks.
-          checks = self.checks.${system};
-
-          # Additional dev-shell environment variables can be set directly
-          # MY_CUSTOM_DEVELOPMENT_VAR = "something else";
-
-          # Extra inputs can be added here; cargo and rustc are provided by default.
-          packages = [
-            # pkgs.ripgrep
-          ];
-        };
-      }
-    );
+    githubActions-server = let
+      server-package = (
+        nixpkgs.lib.mapAttrs
+        (_system: pkgs: nixpkgs.lib.removeAttrs pkgs [ "docker" ])
+        self.packages
+      );
+    in nix-github-actions.lib.mkGithubMatrix {
+      checks = nixpkgs.lib.getAttrs ["x86_64-linux" "aarch64-linux" "aarch64-darwin"] server-package;
+    };
+    githubActions-docker = let
+      docker-package = (
+        nixpkgs.lib.mapAttrs
+        (_system: pkgs: nixpkgs.lib.removeAttrs pkgs [ "server" ])
+        self.packages
+      );
+    in nix-github-actions.lib.mkGithubMatrix {
+      checks = nixpkgs.lib.getAttrs ["x86_64-linux" "aarch64-linux"] docker-package;
+    };
+  };
 }

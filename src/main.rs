@@ -1,17 +1,21 @@
 mod app;
 mod constants;
+mod core;
 mod filter;
+#[cfg(feature = "gui")]
+mod gui;
 mod highlight;
 mod input;
 mod netinfo;
 mod source;
 mod state;
-mod ui;
+mod tui;
 
 use anyhow::Result;
-use app::{App, InputMode};
+use app::App;
 use clap::Parser;
 use constants::POLL_INTERVAL_MS;
+use core::InputMode;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
@@ -40,11 +44,24 @@ struct Cli {
         help = "Listen on TCP port for incoming logs"
     )]
     port: Option<u16>,
+
+    #[cfg(feature = "gui")]
+    #[arg(long = "gui", help = "Use GUI instead of TUI")]
+    gui: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    #[cfg(feature = "gui")]
+    if cli.gui {
+        return gui::run_with_args(cli.file, cli.port);
+    }
+
+    run_tui(cli)
+}
+
+fn run_tui(cli: Cli) -> Result<()> {
     let (tx, rx) = mpsc::channel::<SourceEvent>();
 
     let source = if let Some(port) = cli.port {
@@ -93,7 +110,7 @@ fn run_app(
 
         let visible_height = terminal.size()?.height.saturating_sub(9) as usize;
 
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+        terminal.draw(|f| tui::draw(f, &mut app))?;
 
         if event::poll(Duration::from_millis(POLL_INTERVAL_MS))? {
             let ev = event::read()?;
