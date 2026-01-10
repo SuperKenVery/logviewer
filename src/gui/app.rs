@@ -2,18 +2,19 @@ use crate::core::{FilterState, LogLine};
 use crate::filter::{parse_filter, FilterExpr};
 use crate::source::{start_source, LogSource, SourceEvent};
 use crate::state::AppState;
+use async_channel::Receiver;
 use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 use fancy_regex::Regex;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use tracing::info;
 
-const BATCH_SIZE: usize = 100;
-const UPDATE_INTERVAL_MS: u64 = 16;
 const LINE_HEIGHT: f64 = 20.0;
+
+const BASE_RENDER_THRESHOLD_MS: f64 = 50.0;
+const MIN_RENDER_THRESHOLD_MS: f64 = 5.0;
+const THRESHOLD_DECAY_FACTOR: f64 = 0.7;
 
 #[derive(Clone)]
 pub struct GuiAppState {
@@ -248,13 +249,22 @@ fn highlight_content(content: &str, highlight_expr: &Option<FilterExpr>) -> Vec<
 #[component]
 pub fn GuiApp(props: GuiAppProps) -> Element {
     let mut app_state = use_signal(|| GuiAppState::new());
-    let mut source_rx: Signal<Option<Arc<Mutex<Receiver<SourceEvent>>>>> = use_signal(|| None);
+    let mut source_rx: Signal<Option<Receiver<SourceEvent>>> = use_signal(|| None);
 
     use_effect({
         let file = props.file.clone();
         let port = props.port;
         move || {
-            let (tx, rx) = mpsc::channel::<SourceEvent>();
+            let (sync_tx, sync_rx) = mpsc::channel::<SourceEvent>();
+            let (async_tx, async_rx) = async_channel::unbounded::<SourceEvent>();
+
+            std::thread::spawn(move || {
+                while let Ok(event) = sync_rx.recv() {
+                    if async_tx.send_blocking(event).is_err() {
+                        break;
+                    }
+                }
+            });
 
             let source = if let Some(port) = port {
                 LogSource::Network(port)
@@ -264,45 +274,37 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                 LogSource::Stdin
             };
 
-            if let Err(e) = start_source(source, tx) {
+            if let Err(e) = start_source(source, sync_tx) {
                 app_state.write().status_message = Some(format!("Failed to start source: {}", e));
             } else {
-                source_rx.write().replace(Arc::new(Mutex::new(rx)));
+                source_rx.set(Some(async_rx));
             }
         }
     });
 
     use_future(move || async move {
-        let mut last_update = Instant::now();
+        let rx = loop {
+            let maybe_rx = source_rx.read().clone();
+            if let Some(rx) = maybe_rx {
+                break rx;
+            }
+            async_std::task::sleep(Duration::from_millis(10)).await;
+        };
+
         let mut pending_lines: Vec<String> = Vec::new();
+        let mut last_data_time: Option<Instant> = None;
+        let mut current_threshold_ms: f64 = BASE_RENDER_THRESHOLD_MS;
 
         loop {
-            async_std::task::sleep(Duration::from_millis(UPDATE_INTERVAL_MS)).await;
+            let should_render = if let Some(last_time) = last_data_time {
+                !pending_lines.is_empty()
+                    && last_time.elapsed()
+                        >= Duration::from_micros((current_threshold_ms * 1000.0) as u64)
+            } else {
+                false
+            };
 
-            if let Some(ref rx_arc) = *source_rx.read() {
-                if let Ok(rx) = rx_arc.lock() {
-                    for _ in 0..BATCH_SIZE {
-                        match rx.try_recv() {
-                            Ok(SourceEvent::Line(content)) => {
-                                pending_lines.push(content);
-                            }
-                            Ok(SourceEvent::Error(e)) => {
-                                app_state.write().status_message = Some(format!("Error: {}", e));
-                            }
-                            Ok(SourceEvent::Connected(peer)) => {
-                                app_state.write().status_message =
-                                    Some(format!("Connected: {}", peer));
-                            }
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Disconnected) => break,
-                        }
-                    }
-                }
-            }
-
-            if !pending_lines.is_empty()
-                && last_update.elapsed() >= Duration::from_millis(UPDATE_INTERVAL_MS)
-            {
+            if should_render {
                 let lines_to_add: Vec<String> = pending_lines.drain(..).collect();
                 let mut state = app_state.write();
                 let was_at_bottom = state.follow_tail;
@@ -313,7 +315,61 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                     state.scroll_to_bottom();
                 }
                 state.version += 1;
-                last_update = Instant::now();
+                drop(state);
+
+                last_data_time = None;
+                current_threshold_ms = BASE_RENDER_THRESHOLD_MS;
+                continue;
+            }
+
+            let wait_duration = if let Some(last_time) = last_data_time {
+                let threshold = Duration::from_micros((current_threshold_ms * 1000.0) as u64);
+                threshold.saturating_sub(last_time.elapsed())
+            } else {
+                Duration::from_millis(100)
+            };
+
+            match async_std::future::timeout(wait_duration, rx.recv()).await {
+                Ok(Ok(event)) => {
+                    match event {
+                        SourceEvent::Line(content) => {
+                            pending_lines.push(content);
+                            if last_data_time.is_none() {
+                                last_data_time = Some(Instant::now());
+                            }
+                            current_threshold_ms = (current_threshold_ms * THRESHOLD_DECAY_FACTOR)
+                                .max(MIN_RENDER_THRESHOLD_MS);
+                        }
+                        SourceEvent::Error(e) => {
+                            app_state.write().status_message = Some(format!("Error: {}", e));
+                        }
+                        SourceEvent::Connected(peer) => {
+                            app_state.write().status_message =
+                                Some(format!("Connected: {}", peer));
+                        }
+                    }
+                }
+                Ok(Err(_)) => {
+                    break;
+                }
+                Err(_) => {
+                    if !pending_lines.is_empty() {
+                        let lines_to_add: Vec<String> = pending_lines.drain(..).collect();
+                        let mut state = app_state.write();
+                        let was_at_bottom = state.follow_tail;
+                        for line in lines_to_add {
+                            state.add_line(line);
+                        }
+                        if was_at_bottom {
+                            state.scroll_to_bottom();
+                        }
+                        state.version += 1;
+                        drop(state);
+
+                        last_data_time = None;
+                        current_threshold_ms = BASE_RENDER_THRESHOLD_MS;
+                    }
+                }
             }
         }
     });

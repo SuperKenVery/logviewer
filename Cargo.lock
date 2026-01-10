@@ -4122,6 +4122,7 @@ name = "logviewer"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "async-channel 2.5.0",
  "async-std",
  "chrono",
  "clap",
