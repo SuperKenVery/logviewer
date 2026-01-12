@@ -413,6 +413,9 @@ impl GuiAppState {
     pub fn clear(&mut self) {
         self.lines.clear();
         self.filtered_indices.clear();
+        self.line_heights.clear();
+        self.line_offsets.clear();
+        self.line_offsets.push(0.0);
         self.scroll_y = 0.0;
         self.scroll_x = 0.0;
         self.max_content_width = 0.0;
