@@ -56,18 +56,28 @@ impl ListenState {
         };
     }
 
-    pub fn select_next(&mut self) {
+    fn addr_count(&self) -> usize {
         if !self.addr_list.is_empty() {
-            self.selected_idx = (self.selected_idx + 1) % self.addr_list.len();
+            self.addr_list.len()
+        } else {
+            self.network_interfaces
+                .iter()
+                .map(|iface| iface.addresses.len())
+                .sum()
+        }
+    }
+
+    pub fn select_next(&mut self) {
+        let count = self.addr_count();
+        if count > 0 {
+            self.selected_idx = (self.selected_idx + 1) % count;
         }
     }
 
     pub fn select_prev(&mut self) {
-        if !self.addr_list.is_empty() {
-            self.selected_idx = self
-                .selected_idx
-                .checked_sub(1)
-                .unwrap_or(self.addr_list.len() - 1);
+        let count = self.addr_count();
+        if count > 0 {
+            self.selected_idx = self.selected_idx.checked_sub(1).unwrap_or(count - 1);
         }
     }
 

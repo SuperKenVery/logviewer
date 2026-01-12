@@ -95,7 +95,7 @@ fn draw_text_input(frame: &mut Frame, input: &TextInput, area: Rect, label: &str
     }
 }
 
-fn draw_log_view(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_log_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
 
@@ -136,7 +136,7 @@ fn draw_log_view(frame: &mut Frame, app: &App, area: Rect) {
             continue;
         }
         let line_idx = app.log_state.filtered_indices[filtered_idx];
-        let log_line = &app.log_state.lines[line_idx];
+        let log_line = app.log_state.lines[line_idx].clone();
 
         let mut prefix_spans = Vec::new();
         if app.show_time {
@@ -150,7 +150,7 @@ fn draw_log_view(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::DarkGray),
         ));
 
-        let highlighted = app.render_line(log_line);
+        let highlighted = app.render_line(&log_line);
 
         if app.wrap_lines && content_width > 0 {
             let wrapped = wrap_highlighted(&highlighted, content_width);

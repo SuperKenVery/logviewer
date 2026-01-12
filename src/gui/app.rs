@@ -1,9 +1,9 @@
 use crate::core::{format_relative_time, FilterState, ListenDisplayMode, ListenState, LogLine};
 use crate::filter::{parse_filter, FilterExpr};
+use crate::highlight::{apply_highlights, highlight_line, HighlightStyle};
 use crate::source::{start_source, LogSource, SourceEvent};
 use crate::state::AppState;
 use async_channel::Receiver;
-use dioxus::html::geometry::WheelDelta;
 use dioxus::html::MountedData;
 use dioxus::prelude::*;
 use std::rc::Rc;
@@ -38,6 +38,8 @@ pub struct GuiAppState {
     pub container_width: f64,
     pub max_content_width: f64,
     pub version: u64,
+    pub line_heights: Vec<f64>,
+    pub line_offsets: Vec<f64>,
 }
 
 impl GuiAppState {
@@ -62,6 +64,8 @@ impl GuiAppState {
             container_width: 800.0,
             max_content_width: 0.0,
             version: 0,
+            line_heights: Vec::new(),
+            line_offsets: Vec::new(),
         };
         if !s.hide_text.trim().is_empty() {
             if let Ok(re) = Regex::new(&s.hide_text) {
@@ -81,21 +85,73 @@ impl GuiAppState {
         s
     }
 
-    pub fn get_display_content(&self, line: &LogLine) -> String {
+    pub fn get_display_content(&self, line: &LogLine) -> Result<String, String> {
         match &self.filter_state.hide_regex {
             Some(re) => {
                 let content = &line.content;
-                match re.replace_all(content, "") {
-                    std::borrow::Cow::Borrowed(_) => content.clone(),
-                    std::borrow::Cow::Owned(s) => s,
+                let mut ranges_to_remove: Vec<(usize, usize)> = Vec::new();
+                let mut search_start = 0;
+
+                while search_start < content.len() {
+                    let hay = &content[search_start..];
+                    match re.captures(hay) {
+                        Ok(Some(caps)) => {
+                            let full_match = caps.get(0).unwrap();
+                            if caps.len() > 1 {
+                                for i in 1..caps.len() {
+                                    if let Some(group) = caps.get(i) {
+                                        let abs_start = search_start + group.start();
+                                        let abs_end = search_start + group.end();
+                                        ranges_to_remove.push((abs_start, abs_end));
+                                    }
+                                }
+                            } else {
+                                let abs_start = search_start + full_match.start();
+                                let abs_end = search_start + full_match.end();
+                                ranges_to_remove.push((abs_start, abs_end));
+                            }
+                            search_start += full_match.end().max(1);
+                        }
+                        Ok(None) => break,
+                        Err(e) => return Err(e.to_string()),
+                    }
                 }
+
+                if ranges_to_remove.is_empty() {
+                    return Ok(content.clone());
+                }
+
+                ranges_to_remove.sort_by_key(|r| r.0);
+                let mut merged: Vec<(usize, usize)> = Vec::new();
+                for range in ranges_to_remove {
+                    if let Some(last) = merged.last_mut() {
+                        if range.0 <= last.1 {
+                            last.1 = last.1.max(range.1);
+                            continue;
+                        }
+                    }
+                    merged.push(range);
+                }
+
+                let mut result = String::new();
+                let mut pos = 0;
+                for (start, end) in merged {
+                    if start > pos && start <= content.len() {
+                        result.push_str(&content[pos..start]);
+                    }
+                    pos = end.min(content.len());
+                }
+                if pos < content.len() {
+                    result.push_str(&content[pos..]);
+                }
+                Ok(result)
             }
-            None => line.content.clone(),
+            None => Ok(line.content.clone()),
         }
     }
 
     fn matches_filter(&self, line: &LogLine) -> bool {
-        let content = self.get_display_content(line);
+        let content = self.get_display_content(line).unwrap_or_else(|_| line.content.clone());
         match &self.filter_state.filter_expr {
             Some(expr) => expr.matches(&content),
             None => true,
@@ -109,8 +165,48 @@ impl GuiAppState {
                 self.filtered_indices.push(i);
             }
         }
+        self.reset_line_heights();
         self.clamp_scroll();
         self.version += 1;
+    }
+
+    fn reset_line_heights(&mut self) {
+        let count = self.filtered_indices.len();
+        self.line_heights = vec![LINE_HEIGHT; count];
+        self.rebuild_offsets();
+    }
+
+    fn rebuild_offsets(&mut self) {
+        self.line_offsets.clear();
+        let mut offset = 0.0;
+        for &h in &self.line_heights {
+            self.line_offsets.push(offset);
+            offset += h;
+        }
+        self.line_offsets.push(offset);
+    }
+
+    pub fn total_height(&self) -> f64 {
+        self.line_offsets.last().copied().unwrap_or(0.0)
+    }
+
+    pub fn set_line_height(&mut self, filtered_idx: usize, height: f64) {
+        if filtered_idx < self.line_heights.len() && (self.line_heights[filtered_idx] - height).abs() > 0.5 {
+            self.line_heights[filtered_idx] = height;
+            self.rebuild_offsets();
+            self.version += 1;
+        }
+    }
+
+    pub fn find_visible_range(&self, scroll_y: f64, viewport_height: f64) -> (usize, usize) {
+        let start = self.line_offsets.partition_point(|&o| o <= scroll_y).saturating_sub(1);
+        let end_scroll = scroll_y + viewport_height;
+        let end = self.line_offsets.partition_point(|&o| o < end_scroll).min(self.filtered_indices.len());
+        (start, end)
+    }
+
+    pub fn get_line_offset(&self, filtered_idx: usize) -> f64 {
+        self.line_offsets.get(filtered_idx).copied().unwrap_or(0.0)
     }
 
     fn save_state(&self) {
@@ -205,7 +301,7 @@ impl GuiAppState {
     }
 
     fn estimate_line_width(&self, line: &LogLine) -> f64 {
-        let content = self.get_display_content(line);
+        let content = self.get_display_content(line).unwrap_or_else(|_| line.content.clone());
         let char_width = 7.2;
         let timestamp_width = if self.show_time { 80.0 } else { 0.0 };
         let line_num_width = 62.0;
@@ -222,12 +318,8 @@ impl GuiAppState {
         self.version += 1;
     }
 
-    pub fn total_height(&self) -> f64 {
-        self.filtered_indices.len() as f64 * LINE_HEIGHT
-    }
-
     pub fn max_scroll(&self) -> f64 {
-        (self.total_height() - self.container_height).max(0.0)
+        (self.total_height() - self.container_height + LINE_HEIGHT).max(0.0)
     }
 
     pub fn clamp_scroll(&mut self) {
@@ -249,35 +341,9 @@ pub struct GuiAppProps {
     pub file: Option<PathBuf>,
     pub port: Option<u16>,
 }
-
-fn highlight_content(content: &str, highlight_expr: &Option<FilterExpr>) -> Vec<(String, bool)> {
-    let Some(expr) = highlight_expr else {
-        return vec![(content.to_string(), false)];
-    };
-
-    let matches = expr.find_all_matches(content);
-    if matches.is_empty() {
-        return vec![(content.to_string(), false)];
-    }
-
-    let mut result = Vec::new();
-    let mut last_end = 0;
-
-    for (start, end) in matches {
-        if start > last_end {
-            result.push((content[last_end..start].to_string(), false));
-        }
-        if end > start {
-            result.push((content[start..end].to_string(), true));
-        }
-        last_end = end;
-    }
-
-    if last_end < content.len() {
-        result.push((content[last_end..].to_string(), false));
-    }
-
-    result
+fn highlight_content(content: &str, highlight_expr: &Option<FilterExpr>) -> Vec<(String, HighlightStyle)> {
+    let spans = highlight_line(content, highlight_expr.as_ref(), true, true);
+    apply_highlights(content, &spans)
 }
 
 fn format_addr_display(ip: &std::net::IpAddr, port: u16, is_v6: bool, mode: ListenDisplayMode) -> String {
@@ -297,6 +363,21 @@ fn format_addr_display(ip: &std::net::IpAddr, port: u16, is_v6: bool, mode: List
             }
         }
     }
+}
+
+fn get_copy_text_from_interfaces(state: &ListenState) -> Option<String> {
+    let port = state.port?;
+    let mut addr_idx = 0usize;
+    for iface in &state.network_interfaces {
+        for addr_info in &iface.addresses {
+            if addr_idx == state.selected_idx {
+                let is_v6 = addr_info.ip.is_ipv6();
+                return Some(format_addr_display(&addr_info.ip, port, is_v6, state.display_mode));
+            }
+            addr_idx += 1;
+        }
+    }
+    None
 }
 
 #[component]
@@ -330,7 +411,7 @@ fn ListenPopup(listen_state: Signal<ListenState>) -> Element {
                         listen_state.write().select_next();
                     }
                     Key::Enter => {
-                        if let Some(text) = listen_state.read().get_selected_copy_text() {
+                        if let Some(text) = get_copy_text_from_interfaces(&listen_state.read()) {
                             #[cfg(target_os = "macos")]
                             {
                                 let _ = std::process::Command::new("pbcopy")
@@ -376,29 +457,29 @@ fn ListenPopup(listen_state: Signal<ListenState>) -> Element {
                                         let current_idx = addr_idx;
                                         addr_idx += 1;
                                         let is_selected = current_idx == selected_idx;
-                                        let is_v6 = addr_info.ip.is_ipv6();
+                                        let ip = addr_info.ip;
+                                        let is_v6 = ip.is_ipv6();
                                         let is_self_assigned = addr_info.is_self_assigned;
-                                        let display_text = format_addr_display(&addr_info.ip, port, is_v6, display_mode);
+                                        let display_text = format_addr_display(&ip, port, is_v6, display_mode);
                                         rsx! {
                                             div {
                                                 class: if is_selected { "popup-addr selected" } else if is_self_assigned { "popup-addr self-assigned" } else { "popup-addr" },
                                                 onclick: move |_| {
-                                                    let mut state = listen_state.write();
-                                                    state.selected_idx = current_idx;
-                                                    if let Some(text) = state.get_selected_copy_text() {
-                                                        #[cfg(target_os = "macos")]
-                                                        {
-                                                            let _ = std::process::Command::new("pbcopy")
-                                                                .stdin(std::process::Stdio::piped())
-                                                                .spawn()
-                                                                .and_then(|mut child| {
-                                                                    use std::io::Write;
-                                                                    if let Some(stdin) = child.stdin.as_mut() {
-                                                                        stdin.write_all(text.as_bytes())?;
-                                                                    }
-                                                                    child.wait()
-                                                                });
-                                                        }
+                                                    listen_state.write().selected_idx = current_idx;
+                                                    let mode = listen_state.read().display_mode;
+                                                    let text = format_addr_display(&ip, port, is_v6, mode);
+                                                    #[cfg(target_os = "macos")]
+                                                    {
+                                                        let _ = std::process::Command::new("pbcopy")
+                                                            .stdin(std::process::Stdio::piped())
+                                                            .spawn()
+                                                            .and_then(|mut child| {
+                                                                use std::io::Write;
+                                                                if let Some(stdin) = child.stdin.as_mut() {
+                                                                    stdin.write_all(text.as_bytes())?;
+                                                                }
+                                                                child.wait()
+                                                            });
                                                     }
                                                 },
                                                 span { class: "popup-addr-indicator", if is_selected { "▶ " } else { "  " } }
@@ -549,7 +630,6 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
     let scroll_y = state.scroll_y;
     let scroll_x = state.scroll_x;
     let container_height = state.container_height;
-    let container_width = state.container_width;
     let follow_tail = state.follow_tail;
     let show_time = state.show_time;
     let wrap_lines = state.wrap_lines;
@@ -560,47 +640,43 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
     let filter_error = state.filter_error.clone();
     let status_message = state.status_message.clone();
     let highlight_expr = state.filter_state.highlight_expr.clone();
-    let total_height = state.total_height();
     let max_scroll = state.max_scroll();
-    let max_scroll_x = state.max_scroll_x();
+    let total_height = state.total_height();
+    let (start_idx, end_idx) = state.find_visible_range(scroll_y, container_height + LINE_HEIGHT * 3.0);
     let version = state.version;
     drop(state);
 
-    let start_idx = (scroll_y / LINE_HEIGHT).floor() as usize;
-    let visible_count = (container_height / LINE_HEIGHT).ceil() as usize + 2;
-    let end_idx = (start_idx + visible_count).min(filtered_count);
-    let top_offset = scroll_y % LINE_HEIGHT;
-
-    let visible_lines: Vec<(usize, usize, LogLine, String)> = {
+    let (visible_lines, runtime_hide_error): (Vec<(usize, usize, f64, LogLine, String)>, Option<String>) = {
         let state = app_state.read();
-        (start_idx..end_idx)
-            .enumerate()
-            .filter_map(|(view_idx, filter_idx)| {
+        let mut error: Option<String> = None;
+        let lines: Vec<_> = (start_idx..end_idx)
+            .filter_map(|filter_idx| {
+                let offset = state.get_line_offset(filter_idx);
                 state
                     .filtered_indices
                     .get(filter_idx)
                     .and_then(|&line_idx| {
                         state.lines.get(line_idx).map(|line| {
-                            let content = state.get_display_content(line);
-                            (view_idx, line_idx, line.clone(), content)
+                            let content = match state.get_display_content(line) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    if error.is_none() {
+                                        error = Some(e);
+                                    }
+                                    line.content.clone()
+                                }
+                            };
+                            (filter_idx, line_idx, offset, line.clone(), content)
                         })
                     })
             })
-            .collect()
+            .collect();
+        (lines, error)
     };
 
-    let scroll_thumb_height = if total_height > 0.0 {
-        (container_height / total_height * container_height)
-            .max(30.0)
-            .min(container_height)
-    } else {
-        container_height
-    };
-    let scroll_thumb_top = if max_scroll > 0.0 {
-        scroll_y / max_scroll * (container_height - scroll_thumb_height)
-    } else {
-        0.0
-    };
+    if let Some(err) = runtime_hide_error {
+        app_state.write().hide_error = Some(format!("Runtime error: {}", err));
+    }
 
     rsx! {
         style { {CSS} }
@@ -706,6 +782,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                                 s.container_width = rect.size.width;
                                 s.clamp_scroll();
                                 s.clamp_scroll_x();
+                                s.version += 1;
                             }
                             container_element.set(Some(e.data()));
                         },
@@ -721,23 +798,19 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                                 }
                             }
                         },
-                        onwheel: move |e| {
-                            e.prevent_default();
-                            let wheel_delta = e.delta();
-                            let (delta_x, delta_y) = match wheel_delta {
-                                WheelDelta::Pixels(p) => (p.x, p.y),
-                                WheelDelta::Lines(l) => (l.x * 40.0, l.y * LINE_HEIGHT),
-                                WheelDelta::Pages(p) => (p.x * container_width, p.y * container_height),
-                            };
+                        onscroll: move |e| {
+                            let data = e.data();
+                            let new_scroll_y = data.scroll_top() as f64;
+                            let new_scroll_x = data.scroll_left() as f64;
                             let mut s = app_state.write();
-                            s.scroll_y += delta_y;
-                            s.clamp_scroll();
+                            let (old_start, old_end) = s.find_visible_range(s.scroll_y, s.container_height + LINE_HEIGHT * 3.0);
+                            let (new_start, new_end) = s.find_visible_range(new_scroll_y, s.container_height + LINE_HEIGHT * 3.0);
+                            s.scroll_y = new_scroll_y;
+                            s.scroll_x = new_scroll_x;
                             s.follow_tail = s.is_at_bottom();
-                            if !s.wrap_lines && delta_x.abs() > 0.0 {
-                                s.scroll_x += delta_x;
-                                s.clamp_scroll_x();
+                            if old_start != new_start || old_end != new_end {
+                                s.version += 1;
                             }
-                            s.version += 1;
                         },
                         onkeydown: move |e| {
                             let mut s = app_state.write();
@@ -787,46 +860,42 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                         div {
                             class: "log-list",
                             key: "{version}",
-                            style: if wrap_lines {
-                                format!("transform: translateY(-{top_offset}px);")
-                            } else {
-                                format!("transform: translate(-{scroll_x}px, -{top_offset}px);")
-                            },
-                            for (_view_idx, line_idx, line, content) in visible_lines {
+                            style: "height: {total_height}px; position: relative;",
+                            for (filter_idx, line_idx, offset, line, content) in visible_lines {
                                 div {
                                     class: "log-line",
                                     key: "{line_idx}",
+                                    style: if wrap_lines {
+                                        format!("position: absolute; top: {offset}px; left: 0; right: 0;")
+                                    } else {
+                                        format!("position: absolute; top: {offset}px; left: -{scroll_x}px; right: 0;")
+                                    },
+                                    onmounted: {
+                                        let filter_idx = filter_idx;
+                                        move |e| async move {
+                                            if let Ok(rect) = e.get_client_rect().await {
+                                                app_state.write().set_line_height(filter_idx, rect.size.height);
+                                            }
+                                        }
+                                    },
                                     if show_time {
                                         span { class: "timestamp", "{format_relative_time(line.timestamp)}" }
                                     }
                                     span { class: "line-num", "{line_idx + 1}" }
                                     span { class: "content",
-                                        for (text, is_highlight) in highlight_content(&content, &highlight_expr) {
-                                            if is_highlight {
-                                                mark { class: "highlight", "{text}" }
-                                            } else {
-                                                "{text}"
+                                        for (text, style) in highlight_content(&content, &highlight_expr) {
+                                            {
+                                                let class = style.css_class();
+                                                if class.is_empty() {
+                                                    rsx! { "{text}" }
+                                                } else {
+                                                    rsx! { span { class: "{class}", "{text}" } }
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                    }
-                    if total_height > container_height {
-                        div { class: "scrollbar",
-                            div {
-                                class: "scrollbar-thumb",
-                                style: "top: {scroll_thumb_top}px; height: {scroll_thumb_height}px;",
-                            }
-                        }
-                    }
-                }
-                if !wrap_lines && max_scroll_x > 0.0 {
-                    div { class: "scrollbar-h",
-                        div {
-                            class: "scrollbar-thumb-h",
-                            style: "left: {scroll_x / max_scroll_x * (container_width - 60.0)}px; width: {(container_width / (container_width + max_scroll_x) * container_width).max(60.0)}px;",
                         }
                     }
                 }
@@ -836,6 +905,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                 span { class: "status-info",
                     "{filtered_count} / {total_lines} lines"
                     if follow_tail { " • Following" }
+                    " • h:{container_height:.0} scroll:{scroll_y:.0}/{max_scroll:.0}"
                 }
                 if let Some(msg) = status_message {
                     span { class: "status-msg", "{msg}" }
@@ -856,6 +926,11 @@ const CSS: &str = r#"
     padding: 0;
 }
 
+html, body {
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
 .app {
     display: flex;
     flex-direction: column;
@@ -865,6 +940,7 @@ const CSS: &str = r#"
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 13px;
     color-scheme: light dark;
+    overflow: hidden;
 }
 
 .toolbar {
@@ -951,10 +1027,16 @@ const CSS: &str = r#"
 
 .log-container {
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
     background: light-dark(#ffffff, #1e1e1e);
     outline: none;
     position: relative;
+    overscroll-behavior: contain;
+}
+
+.nowrap-mode.log-container {
+    overflow-x: auto;
 }
 
 .log-container:focus {
@@ -964,6 +1046,7 @@ const CSS: &str = r#"
 .log-list {
     position: relative;
     will-change: transform;
+    padding-bottom: 4px;
 }
 
 .nowrap-mode .log-list {
@@ -1023,11 +1106,59 @@ const CSS: &str = r#"
     word-break: break-all;
 }
 
-.highlight {
+.hl-error {
+    color: light-dark(#dc3545, #f85149);
+    font-weight: bold;
+}
+
+.hl-warn {
+    color: light-dark(#ffc107, #d29922);
+    font-weight: bold;
+}
+
+.hl-info {
+    color: light-dark(#28a745, #3fb950);
+    font-weight: bold;
+}
+
+.hl-debug {
+    color: light-dark(#17a2b8, #58a6ff);
+}
+
+.hl-bracket {
+    color: light-dark(#0066cc, #79c0ff);
+}
+
+.hl-timestamp {
+    color: light-dark(#6f42c1, #d2a8ff);
+}
+
+.hl-custom {
     background: light-dark(#ffff00, #ffcc00);
     color: light-dark(#000000, #000000);
     padding: 0 2px;
     border-radius: 2px;
+    font-weight: bold;
+}
+
+.hl-json-key {
+    color: light-dark(#17a2b8, #58a6ff);
+}
+
+.hl-json-string {
+    color: light-dark(#28a745, #3fb950);
+}
+
+.hl-json-number {
+    color: light-dark(#fd7e14, #d29922);
+}
+
+.hl-json-bool {
+    color: light-dark(#6f42c1, #d2a8ff);
+}
+
+.hl-json-null {
+    color: light-dark(#dc3545, #f85149);
 }
 
 .scrollbar {

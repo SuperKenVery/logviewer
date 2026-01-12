@@ -46,15 +46,15 @@ struct Cli {
     port: Option<u16>,
 
     #[cfg(feature = "gui")]
-    #[arg(long = "gui", help = "Use GUI instead of TUI")]
-    gui: bool,
+    #[arg(long = "tui", help = "Use TUI instead of GUI")]
+    tui: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     #[cfg(feature = "gui")]
-    if cli.gui {
+    if !cli.tui {
         return gui::run_with_args(cli.file, cli.port);
     }
 

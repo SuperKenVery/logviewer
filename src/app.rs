@@ -1,7 +1,7 @@
 use crate::constants::{PREFIX_WIDTH_WITHOUT_TIME, PREFIX_WIDTH_WITH_TIME};
 use crate::core::{FilterState, InputFields, InputMode, ListenState, LogLine, LogState};
 use crate::filter::parse_filter;
-use crate::highlight::{apply_highlights, highlight_line};
+use crate::highlight::{apply_highlights_ratatui, highlight_line};
 use crate::source::SourceEvent;
 use crate::state::AppState;
 use crossterm::event::KeyCode;
@@ -106,7 +106,7 @@ impl App {
         }
     }
 
-    pub fn get_display_content(&self, line: &LogLine) -> String {
+    pub fn get_display_content(&self, line: &LogLine) -> Result<String, String> {
         match &self.filter_state.hide_regex {
             Some(re) => {
                 let content = &line.content;
@@ -131,17 +131,15 @@ impl App {
                                 let abs_end = search_start + full_match.end();
                                 ranges_to_remove.push((abs_start, abs_end));
                             }
-                            search_start += search_start + full_match.end().max(1);
-                            if search_start == 0 {
-                                break;
-                            }
+                            search_start += full_match.end().max(1);
                         }
-                        _ => break,
+                        Ok(None) => break,
+                        Err(e) => return Err(e.to_string()),
                     }
                 }
 
                 if ranges_to_remove.is_empty() {
-                    return content.clone();
+                    return Ok(content.clone());
                 }
 
                 ranges_to_remove.sort_by_key(|r| r.0);
@@ -167,9 +165,9 @@ impl App {
                 if pos < content.len() {
                     result.push_str(&content[pos..]);
                 }
-                result
+                Ok(result)
             }
-            None => line.content.clone(),
+            None => Ok(line.content.clone()),
         }
     }
 
@@ -177,7 +175,8 @@ impl App {
         if idx >= self.log_state.lines.len() {
             return false;
         }
-        let content = self.get_display_content(&self.log_state.lines[idx]);
+        let line = &self.log_state.lines[idx];
+        let content = self.get_display_content(line).unwrap_or_else(|_| line.content.clone());
         match &self.filter_state.filter_expr {
             Some(expr) => expr.matches(&content),
             None => true,
@@ -267,15 +266,21 @@ impl App {
         self.status_message = Some("Cleared".to_string());
     }
 
-    pub fn render_line(&self, line: &LogLine) -> Vec<(String, ratatui::style::Style)> {
-        let content = self.get_display_content(line);
+    pub fn render_line(&mut self, line: &LogLine) -> Vec<(String, ratatui::style::Style)> {
+        let content = match self.get_display_content(line) {
+            Ok(c) => c,
+            Err(e) => {
+                self.input_fields.hide.set_error(Some(format!("Runtime error: {}", e)));
+                line.content.clone()
+            }
+        };
         let spans = highlight_line(
             &content,
             self.filter_state.highlight_expr.as_ref(),
             true,
             true,
         );
-        apply_highlights(&content, &spans)
+        apply_highlights_ratatui(&content, &spans)
     }
 
     pub fn toggle_time(&mut self) {

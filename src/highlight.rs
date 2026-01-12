@@ -1,50 +1,99 @@
 use crate::filter::FilterExpr;
-use ratatui::style::{Color, Modifier, Style};
 use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
 
-#[derive(Clone)]
-pub struct HighlightRule {
-    pub regex: Regex,
-    pub style: Style,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HighlightStyle {
+    None,
+    Error,
+    Warning,
+    Info,
+    Debug,
+    Bracket,
+    Timestamp,
+    CustomHighlight,
+    JsonKey,
+    JsonString,
+    JsonNumber,
+    JsonBool,
+    JsonNull,
 }
 
-static HEURISTIC_RULES: LazyLock<Vec<HighlightRule>> = LazyLock::new(|| {
+impl HighlightStyle {
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            HighlightStyle::None => "",
+            HighlightStyle::Error => "hl-error",
+            HighlightStyle::Warning => "hl-warn",
+            HighlightStyle::Info => "hl-info",
+            HighlightStyle::Debug => "hl-debug",
+            HighlightStyle::Bracket => "hl-bracket",
+            HighlightStyle::Timestamp => "hl-timestamp",
+            HighlightStyle::CustomHighlight => "hl-custom",
+            HighlightStyle::JsonKey => "hl-json-key",
+            HighlightStyle::JsonString => "hl-json-string",
+            HighlightStyle::JsonNumber => "hl-json-number",
+            HighlightStyle::JsonBool => "hl-json-bool",
+            HighlightStyle::JsonNull => "hl-json-null",
+        }
+    }
+
+    pub fn to_ratatui_style(&self) -> ratatui::style::Style {
+        use ratatui::style::{Color, Modifier, Style};
+        match self {
+            HighlightStyle::None => Style::default(),
+            HighlightStyle::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            HighlightStyle::Warning => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            HighlightStyle::Info => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            HighlightStyle::Debug => Style::default().fg(Color::Cyan),
+            HighlightStyle::Bracket => Style::default().fg(Color::Blue),
+            HighlightStyle::Timestamp => Style::default().fg(Color::Magenta),
+            HighlightStyle::CustomHighlight => Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD),
+            HighlightStyle::JsonKey => Style::default().fg(Color::Cyan),
+            HighlightStyle::JsonString => Style::default().fg(Color::Green),
+            HighlightStyle::JsonNumber => Style::default().fg(Color::Yellow),
+            HighlightStyle::JsonBool => Style::default().fg(Color::Magenta),
+            HighlightStyle::JsonNull => Style::default().fg(Color::Red),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct HeuristicRule {
+    regex: Regex,
+    style: HighlightStyle,
+}
+
+static HEURISTIC_RULES: LazyLock<Vec<HeuristicRule>> = LazyLock::new(|| {
     vec![
-        HighlightRule {
+        HeuristicRule {
             regex: Regex::new(r"(?i)\b(error|err|fatal|fail(ed)?|panic)\b").unwrap(),
-            style: Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            style: HighlightStyle::Error,
         },
-        HighlightRule {
+        HeuristicRule {
             regex: Regex::new(r"(?i)\b(warn(ing)?)\b").unwrap(),
-            style: Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            style: HighlightStyle::Warning,
         },
-        HighlightRule {
+        HeuristicRule {
             regex: Regex::new(r"(?i)\b(info)\b").unwrap(),
-            style: Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            style: HighlightStyle::Info,
         },
-        HighlightRule {
+        HeuristicRule {
             regex: Regex::new(r"(?i)\b(debug|trace)\b").unwrap(),
-            style: Style::default().fg(Color::Cyan),
+            style: HighlightStyle::Debug,
         },
-        HighlightRule {
+        HeuristicRule {
             regex: Regex::new(r"\[[^\]]+\]").unwrap(),
-            style: Style::default().fg(Color::Blue),
+            style: HighlightStyle::Bracket,
         },
-        HighlightRule {
+        HeuristicRule {
             regex: Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap(),
-            style: Style::default().fg(Color::Magenta),
+            style: HighlightStyle::Timestamp,
         },
-        HighlightRule {
+        HeuristicRule {
             regex: Regex::new(r"\d{2}:\d{2}:\d{2}").unwrap(),
-            style: Style::default().fg(Color::Magenta),
+            style: HighlightStyle::Timestamp,
         },
     ]
 });
@@ -53,7 +102,7 @@ static HEURISTIC_RULES: LazyLock<Vec<HighlightRule>> = LazyLock::new(|| {
 pub struct Span {
     pub start: usize,
     pub end: usize,
-    pub style: Style,
+    pub style: HighlightStyle,
     pub priority: u8,
 }
 
@@ -71,10 +120,7 @@ pub fn highlight_line(
             spans.push(Span {
                 start,
                 end,
-                style: Style::default()
-                    .bg(Color::Yellow)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
+                style: HighlightStyle::CustomHighlight,
                 priority: 100,
             });
         }
@@ -105,12 +151,12 @@ pub fn highlight_line(
     spans
 }
 
-pub fn apply_highlights(text: &str, spans: &[Span]) -> Vec<(String, Style)> {
+pub fn apply_highlights(text: &str, spans: &[Span]) -> Vec<(String, HighlightStyle)> {
     if spans.is_empty() {
-        return vec![(text.to_string(), Style::default())];
+        return vec![(text.to_string(), HighlightStyle::None)];
     }
 
-    let mut style_at: Vec<(Style, u8)> = vec![(Style::default(), 0); text.len()];
+    let mut style_at: Vec<(HighlightStyle, u8)> = vec![(HighlightStyle::None, 0); text.len()];
     
     for span in spans {
         let start = char_to_byte_pos(text, span.start);
@@ -139,6 +185,13 @@ pub fn apply_highlights(text: &str, spans: &[Span]) -> Vec<(String, Style)> {
     }
 
     result
+}
+
+pub fn apply_highlights_ratatui(text: &str, spans: &[Span]) -> Vec<(String, ratatui::style::Style)> {
+    apply_highlights(text, spans)
+        .into_iter()
+        .map(|(s, style)| (s, style.to_ratatui_style()))
+        .collect()
 }
 
 fn char_to_byte_pos(text: &str, char_pos: usize) -> usize {
@@ -195,7 +248,7 @@ fn highlight_json_value(text: &str, value: &Value, base_offset: usize, spans: &m
                     spans.push(Span {
                         start: base_offset + key_pos,
                         end: base_offset + key_pos + key.len() + 2,
-                        style: Style::default().fg(Color::Cyan),
+                        style: HighlightStyle::JsonKey,
                         priority: 50,
                     });
                 }
@@ -212,7 +265,7 @@ fn highlight_json_value(text: &str, value: &Value, base_offset: usize, spans: &m
                 spans.push(Span {
                     start: base_offset + pos,
                     end: base_offset + pos + s.len() + 2,
-                    style: Style::default().fg(Color::Green),
+                    style: HighlightStyle::JsonString,
                     priority: 50,
                 });
             }
@@ -223,7 +276,7 @@ fn highlight_json_value(text: &str, value: &Value, base_offset: usize, spans: &m
                 spans.push(Span {
                     start: base_offset + pos,
                     end: base_offset + pos + n_str.len(),
-                    style: Style::default().fg(Color::Yellow),
+                    style: HighlightStyle::JsonNumber,
                     priority: 50,
                 });
             }
@@ -234,7 +287,7 @@ fn highlight_json_value(text: &str, value: &Value, base_offset: usize, spans: &m
                 spans.push(Span {
                     start: base_offset + pos,
                     end: base_offset + pos + b_str.len(),
-                    style: Style::default().fg(Color::Magenta),
+                    style: HighlightStyle::JsonBool,
                     priority: 50,
                 });
             }
@@ -244,7 +297,7 @@ fn highlight_json_value(text: &str, value: &Value, base_offset: usize, spans: &m
                 spans.push(Span {
                     start: base_offset + pos,
                     end: base_offset + pos + 4,
-                    style: Style::default().fg(Color::Red),
+                    style: HighlightStyle::JsonNull,
                     priority: 50,
                 });
             }
