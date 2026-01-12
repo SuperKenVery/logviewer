@@ -1,10 +1,12 @@
-use crate::core::{format_relative_time, FilterState, LogLine};
+use crate::core::{format_relative_time, FilterState, ListenDisplayMode, ListenState, LogLine};
 use crate::filter::{parse_filter, FilterExpr};
 use crate::source::{start_source, LogSource, SourceEvent};
 use crate::state::AppState;
 use async_channel::Receiver;
 use dioxus::html::geometry::WheelDelta;
+use dioxus::html::MountedData;
 use dioxus::prelude::*;
+use std::rc::Rc;
 use fancy_regex::Regex;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -23,6 +25,7 @@ pub struct GuiAppState {
     pub filter_state: FilterState,
     pub follow_tail: bool,
     pub show_time: bool,
+    pub wrap_lines: bool,
     pub hide_text: String,
     pub filter_text: String,
     pub highlight_text: String,
@@ -30,7 +33,10 @@ pub struct GuiAppState {
     pub filter_error: Option<String>,
     pub status_message: Option<String>,
     pub scroll_y: f64,
+    pub scroll_x: f64,
     pub container_height: f64,
+    pub container_width: f64,
+    pub max_content_width: f64,
     pub version: u64,
 }
 
@@ -43,6 +49,7 @@ impl GuiAppState {
             filter_state: FilterState::default(),
             follow_tail: true,
             show_time: true,
+            wrap_lines: state.wrap_lines,
             hide_text: state.hide_input.clone(),
             filter_text: state.filter_input.clone(),
             highlight_text: state.highlight_input.clone(),
@@ -50,7 +57,10 @@ impl GuiAppState {
             filter_error: None,
             status_message: None,
             scroll_y: 0.0,
+            scroll_x: 0.0,
             container_height: 600.0,
+            container_width: 800.0,
+            max_content_width: 0.0,
             version: 0,
         };
         if !s.hide_text.trim().is_empty() {
@@ -108,9 +118,18 @@ impl GuiAppState {
             hide_input: self.hide_text.clone(),
             filter_input: self.filter_text.clone(),
             highlight_input: self.highlight_text.clone(),
-            wrap_lines: false,
+            wrap_lines: self.wrap_lines,
         };
         state.save();
+    }
+
+    pub fn max_scroll_x(&self) -> f64 {
+        (self.max_content_width - self.container_width).max(0.0)
+    }
+
+    pub fn clamp_scroll_x(&mut self) {
+        let max = self.max_scroll_x();
+        self.scroll_x = self.scroll_x.clamp(0.0, max);
     }
 
     pub fn apply_hide(&mut self) {
@@ -175,16 +194,31 @@ impl GuiAppState {
         };
         let idx = self.lines.len();
         let matches = self.matches_filter(&line);
+        let estimated_width = self.estimate_line_width(&line);
+        if estimated_width > self.max_content_width {
+            self.max_content_width = estimated_width;
+        }
         self.lines.push(line);
         if matches {
             self.filtered_indices.push(idx);
         }
     }
 
+    fn estimate_line_width(&self, line: &LogLine) -> f64 {
+        let content = self.get_display_content(line);
+        let char_width = 7.2;
+        let timestamp_width = if self.show_time { 80.0 } else { 0.0 };
+        let line_num_width = 62.0;
+        let padding = 24.0;
+        timestamp_width + line_num_width + (content.len() as f64 * char_width) + padding
+    }
+
     pub fn clear(&mut self) {
         self.lines.clear();
         self.filtered_indices.clear();
         self.scroll_y = 0.0;
+        self.scroll_x = 0.0;
+        self.max_content_width = 0.0;
         self.version += 1;
     }
 
@@ -246,10 +280,148 @@ fn highlight_content(content: &str, highlight_expr: &Option<FilterExpr>) -> Vec<
     result
 }
 
+fn format_addr_display(ip: &std::net::IpAddr, port: u16, is_v6: bool, mode: ListenDisplayMode) -> String {
+    match mode {
+        ListenDisplayMode::AddrPort => {
+            if is_v6 {
+                format!("[{}]:{}", ip, port)
+            } else {
+                format!("{}:{}", ip, port)
+            }
+        }
+        ListenDisplayMode::NcCommand => {
+            if is_v6 {
+                format!("nc -6 {} {}", ip, port)
+            } else {
+                format!("nc {} {}", ip, port)
+            }
+        }
+    }
+}
+
+#[component]
+fn ListenPopup(listen_state: Signal<ListenState>) -> Element {
+    let state = listen_state.read();
+    let port = state.port.unwrap_or(0);
+    let interfaces = state.network_interfaces.clone();
+    let display_mode = state.display_mode;
+    let selected_idx = state.selected_idx;
+    drop(state);
+
+    let mut addr_idx = 0usize;
+    let mode_str = match display_mode {
+        ListenDisplayMode::AddrPort => "[addr:port]  nc command",
+        ListenDisplayMode::NcCommand => " addr:port  [nc command]",
+    };
+
+    rsx! {
+        div { class: "popup-overlay",
+            tabindex: "0",
+            onclick: move |_| {},
+            onkeydown: move |e| {
+                match e.key() {
+                    Key::Tab => {
+                        listen_state.write().toggle_display_mode();
+                    }
+                    Key::ArrowUp => {
+                        listen_state.write().select_prev();
+                    }
+                    Key::ArrowDown => {
+                        listen_state.write().select_next();
+                    }
+                    Key::Enter => {
+                        if let Some(text) = listen_state.read().get_selected_copy_text() {
+                            #[cfg(target_os = "macos")]
+                            {
+                                let _ = std::process::Command::new("pbcopy")
+                                    .stdin(std::process::Stdio::piped())
+                                    .spawn()
+                                    .and_then(|mut child| {
+                                        use std::io::Write;
+                                        if let Some(stdin) = child.stdin.as_mut() {
+                                            stdin.write_all(text.as_bytes())?;
+                                        }
+                                        child.wait()
+                                    });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            },
+            div { class: "popup",
+                onclick: move |e| e.stop_propagation(),
+                div { class: "popup-header",
+                    span { "Listening on port " }
+                    span { class: "popup-port", "{port}" }
+                }
+                div { class: "popup-mode",
+                    span { class: "popup-label", "Mode (Tab): " }
+                    span { class: "popup-mode-value", "{mode_str}" }
+                }
+                div { class: "popup-hint", "↑↓:Select  Enter/Click:Copy" }
+                div { class: "popup-interfaces",
+                    if interfaces.is_empty() {
+                        div { class: "popup-error", "No network interfaces found" }
+                    } else {
+                        for iface in interfaces.iter() {
+                            div { class: "popup-interface",
+                                div {
+                                    class: if iface.is_default { "popup-iface-name default" } else { "popup-iface-name" },
+                                    "{iface.name}"
+                                    if iface.is_default { " (default)" }
+                                }
+                                for addr_info in iface.addresses.iter() {
+                                    {
+                                        let current_idx = addr_idx;
+                                        addr_idx += 1;
+                                        let is_selected = current_idx == selected_idx;
+                                        let is_v6 = addr_info.ip.is_ipv6();
+                                        let is_self_assigned = addr_info.is_self_assigned;
+                                        let display_text = format_addr_display(&addr_info.ip, port, is_v6, display_mode);
+                                        rsx! {
+                                            div {
+                                                class: if is_selected { "popup-addr selected" } else if is_self_assigned { "popup-addr self-assigned" } else { "popup-addr" },
+                                                onclick: move |_| {
+                                                    let mut state = listen_state.write();
+                                                    state.selected_idx = current_idx;
+                                                    if let Some(text) = state.get_selected_copy_text() {
+                                                        #[cfg(target_os = "macos")]
+                                                        {
+                                                            let _ = std::process::Command::new("pbcopy")
+                                                                .stdin(std::process::Stdio::piped())
+                                                                .spawn()
+                                                                .and_then(|mut child| {
+                                                                    use std::io::Write;
+                                                                    if let Some(stdin) = child.stdin.as_mut() {
+                                                                        stdin.write_all(text.as_bytes())?;
+                                                                    }
+                                                                    child.wait()
+                                                                });
+                                                        }
+                                                    }
+                                                },
+                                                span { class: "popup-addr-indicator", if is_selected { "▶ " } else { "  " } }
+                                                span { class: "popup-addr-text", "{display_text}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn GuiApp(props: GuiAppProps) -> Element {
     let mut app_state = use_signal(|| GuiAppState::new());
     let mut source_rx: Signal<Option<Receiver<SourceEvent>>> = use_signal(|| None);
+    let mut container_element: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
+    let mut listen_state = use_signal(|| ListenState::new(props.port));
 
     use_effect({
         let file = props.file.clone();
@@ -312,6 +484,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                                 app_state.write().status_message = Some(format!("Error: {}", e));
                             }
                             SourceEvent::Connected(peer) => {
+                                listen_state.write().has_connection = true;
                                 app_state.write().status_message =
                                     Some(format!("Connected: {}", peer));
                             }
@@ -349,6 +522,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                                 app_state.write().status_message = Some(format!("Error: {}", e));
                             }
                             SourceEvent::Connected(peer) => {
+                                listen_state.write().has_connection = true;
                                 app_state.write().status_message =
                                     Some(format!("Connected: {}", peer));
                             }
@@ -373,9 +547,12 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
     let total_lines = state.lines.len();
     let filtered_count = state.filtered_indices.len();
     let scroll_y = state.scroll_y;
+    let scroll_x = state.scroll_x;
     let container_height = state.container_height;
+    let container_width = state.container_width;
     let follow_tail = state.follow_tail;
     let show_time = state.show_time;
+    let wrap_lines = state.wrap_lines;
     let hide_text = state.hide_text.clone();
     let filter_text = state.filter_text.clone();
     let highlight_text = state.highlight_text.clone();
@@ -385,6 +562,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
     let highlight_expr = state.filter_state.highlight_expr.clone();
     let total_height = state.total_height();
     let max_scroll = state.max_scroll();
+    let max_scroll_x = state.max_scroll_x();
     let version = state.version;
     drop(state);
 
@@ -483,6 +661,19 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                         "Time"
                     }
                     button {
+                        class: if wrap_lines { "active" } else { "" },
+                        onclick: move |_| {
+                            let mut s = app_state.write();
+                            s.wrap_lines = !s.wrap_lines;
+                            if s.wrap_lines {
+                                s.scroll_x = 0.0;
+                            }
+                            s.version += 1;
+                            s.save_state();
+                        },
+                        "Wrap"
+                    }
+                    button {
                         class: if follow_tail { "active" } else { "" },
                         onclick: move |_| {
                             let mut s = app_state.write();
@@ -504,92 +695,138 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
             }
 
             div { class: "log-wrapper",
-                div {
-                    class: "log-container",
-                    tabindex: "0",
-                    onmounted: move |e| async move {
-                        if let Ok(rect) = e.get_client_rect().await {
-                            let mut s = app_state.write();
-                            s.container_height = rect.size.height;
-                            s.clamp_scroll();
-                        }
-                    },
-                    onwheel: move |e| {
-                        e.prevent_default();
-                        let wheel_delta = e.delta();
-                        let delta_y = match wheel_delta {
-                            WheelDelta::Pixels(p) => p.y,
-                            WheelDelta::Lines(l) => l.y * LINE_HEIGHT,
-                            WheelDelta::Pages(p) => p.y * container_height,
-                        };
-                        let mut s = app_state.write();
-                        s.scroll_y += delta_y;
-                        s.clamp_scroll();
-                        s.follow_tail = s.is_at_bottom();
-                        s.version += 1;
-                    },
-                    onkeydown: move |e| {
-                        let mut s = app_state.write();
-                        match e.key() {
-                            Key::ArrowUp => {
-                                s.scroll_y -= LINE_HEIGHT;
-                                s.follow_tail = false;
-                            }
-                            Key::ArrowDown => {
-                                s.scroll_y += LINE_HEIGHT;
-                                s.follow_tail = s.is_at_bottom();
-                            }
-                            Key::PageUp => {
-                                s.scroll_y -= s.container_height;
-                                s.follow_tail = false;
-                            }
-                            Key::PageDown => {
-                                s.scroll_y += s.container_height;
-                                s.follow_tail = s.is_at_bottom();
-                            }
-                            Key::Home => {
-                                s.scroll_y = 0.0;
-                                s.follow_tail = false;
-                            }
-                            Key::End => {
-                                s.scroll_to_bottom();
-                                s.follow_tail = true;
-                            }
-                            _ => return,
-                        }
-                        s.clamp_scroll();
-                        s.version += 1;
-                    },
+                div { class: "log-main",
                     div {
-                        class: "log-list",
-                        key: "{version}",
-                        style: "transform: translateY(-{top_offset}px);",
-                        for (_view_idx, line_idx, line, content) in visible_lines {
-                            div {
-                                class: "log-line",
-                                key: "{line_idx}",
-                                if show_time {
-                                    span { class: "timestamp", "{format_relative_time(line.timestamp)}" }
+                        class: if wrap_lines { "log-container wrap-mode" } else { "log-container nowrap-mode" },
+                        tabindex: "0",
+                        onmounted: move |e| async move {
+                            if let Ok(rect) = e.get_client_rect().await {
+                                let mut s = app_state.write();
+                                s.container_height = rect.size.height;
+                                s.container_width = rect.size.width;
+                                s.clamp_scroll();
+                                s.clamp_scroll_x();
+                            }
+                            container_element.set(Some(e.data()));
+                        },
+                        onresize: move |_| async move {
+                            if let Some(ref el) = *container_element.read() {
+                                if let Ok(rect) = el.get_client_rect().await {
+                                    let mut s = app_state.write();
+                                    s.container_height = rect.size.height;
+                                    s.container_width = rect.size.width;
+                                    s.clamp_scroll();
+                                    s.clamp_scroll_x();
+                                    s.version += 1;
                                 }
-                                span { class: "line-num", "{line_idx + 1}" }
-                                span { class: "content",
-                                    for (text, is_highlight) in highlight_content(&content, &highlight_expr) {
-                                        if is_highlight {
-                                            mark { class: "highlight", "{text}" }
-                                        } else {
-                                            "{text}"
+                            }
+                        },
+                        onwheel: move |e| {
+                            e.prevent_default();
+                            let wheel_delta = e.delta();
+                            let (delta_x, delta_y) = match wheel_delta {
+                                WheelDelta::Pixels(p) => (p.x, p.y),
+                                WheelDelta::Lines(l) => (l.x * 40.0, l.y * LINE_HEIGHT),
+                                WheelDelta::Pages(p) => (p.x * container_width, p.y * container_height),
+                            };
+                            let mut s = app_state.write();
+                            s.scroll_y += delta_y;
+                            s.clamp_scroll();
+                            s.follow_tail = s.is_at_bottom();
+                            if !s.wrap_lines && delta_x.abs() > 0.0 {
+                                s.scroll_x += delta_x;
+                                s.clamp_scroll_x();
+                            }
+                            s.version += 1;
+                        },
+                        onkeydown: move |e| {
+                            let mut s = app_state.write();
+                            match e.key() {
+                                Key::ArrowUp => {
+                                    s.scroll_y -= LINE_HEIGHT;
+                                    s.follow_tail = false;
+                                }
+                                Key::ArrowDown => {
+                                    s.scroll_y += LINE_HEIGHT;
+                                    s.follow_tail = s.is_at_bottom();
+                                }
+                                Key::ArrowLeft => {
+                                    if !s.wrap_lines {
+                                        s.scroll_x -= 40.0;
+                                        s.clamp_scroll_x();
+                                    }
+                                }
+                                Key::ArrowRight => {
+                                    if !s.wrap_lines {
+                                        s.scroll_x += 40.0;
+                                        s.clamp_scroll_x();
+                                    }
+                                }
+                                Key::PageUp => {
+                                    s.scroll_y -= s.container_height;
+                                    s.follow_tail = false;
+                                }
+                                Key::PageDown => {
+                                    s.scroll_y += s.container_height;
+                                    s.follow_tail = s.is_at_bottom();
+                                }
+                                Key::Home => {
+                                    s.scroll_y = 0.0;
+                                    s.scroll_x = 0.0;
+                                    s.follow_tail = false;
+                                }
+                                Key::End => {
+                                    s.scroll_to_bottom();
+                                    s.follow_tail = true;
+                                }
+                                _ => return,
+                            }
+                            s.clamp_scroll();
+                            s.version += 1;
+                        },
+                        div {
+                            class: "log-list",
+                            key: "{version}",
+                            style: if wrap_lines {
+                                format!("transform: translateY(-{top_offset}px);")
+                            } else {
+                                format!("transform: translate(-{scroll_x}px, -{top_offset}px);")
+                            },
+                            for (_view_idx, line_idx, line, content) in visible_lines {
+                                div {
+                                    class: "log-line",
+                                    key: "{line_idx}",
+                                    if show_time {
+                                        span { class: "timestamp", "{format_relative_time(line.timestamp)}" }
+                                    }
+                                    span { class: "line-num", "{line_idx + 1}" }
+                                    span { class: "content",
+                                        for (text, is_highlight) in highlight_content(&content, &highlight_expr) {
+                                            if is_highlight {
+                                                mark { class: "highlight", "{text}" }
+                                            } else {
+                                                "{text}"
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                    if total_height > container_height {
+                        div { class: "scrollbar",
+                            div {
+                                class: "scrollbar-thumb",
+                                style: "top: {scroll_thumb_top}px; height: {scroll_thumb_height}px;",
+                            }
+                        }
+                    }
                 }
-                if total_height > container_height {
-                    div { class: "scrollbar",
+                if !wrap_lines && max_scroll_x > 0.0 {
+                    div { class: "scrollbar-h",
                         div {
-                            class: "scrollbar-thumb",
-                            style: "top: {scroll_thumb_top}px; height: {scroll_thumb_height}px;",
+                            class: "scrollbar-thumb-h",
+                            style: "left: {scroll_x / max_scroll_x * (container_width - 60.0)}px; width: {(container_width / (container_width + max_scroll_x) * container_width).max(60.0)}px;",
                         }
                     }
                 }
@@ -603,6 +840,10 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                 if let Some(msg) = status_message {
                     span { class: "status-msg", "{msg}" }
                 }
+            }
+
+            if listen_state.read().show_popup() {
+                ListenPopup { listen_state }
             }
         }
     }
@@ -696,8 +937,16 @@ const CSS: &str = r#"
 .log-wrapper {
     flex: 1;
     display: flex;
+    flex-direction: column;
     overflow: hidden;
     position: relative;
+}
+
+.log-main {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    overflow: hidden;
 }
 
 .log-container {
@@ -717,6 +966,10 @@ const CSS: &str = r#"
     will-change: transform;
 }
 
+.nowrap-mode .log-list {
+    min-width: max-content;
+}
+
 .log-line {
     display: flex;
     padding: 1px 12px;
@@ -724,7 +977,17 @@ const CSS: &str = r#"
     font-size: 12px;
     height: 20px;
     line-height: 18px;
+}
+
+.nowrap-mode .log-line {
     white-space: nowrap;
+}
+
+.wrap-mode .log-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+    height: auto;
+    min-height: 20px;
 }
 
 .log-line:hover {
@@ -747,8 +1010,17 @@ const CSS: &str = r#"
 
 .content {
     color: light-dark(#1e1e1e, #d4d4d4);
+}
+
+.nowrap-mode .content {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wrap-mode .content {
+    white-space: pre-wrap;
+    word-break: break-all;
 }
 
 .highlight {
@@ -778,6 +1050,26 @@ const CSS: &str = r#"
     background: light-dark(#a0a0a0, #787878);
 }
 
+.scrollbar-h {
+    height: 14px;
+    background: light-dark(#f0f0f0, #1e1e1e);
+    border-top: 1px solid light-dark(#d4d4d4, #3c3c3c);
+    position: relative;
+}
+
+.scrollbar-thumb-h {
+    position: absolute;
+    height: 10px;
+    top: 2px;
+    background: light-dark(#c4c4c4, #5a5a5a);
+    border-radius: 5px;
+    min-width: 30px;
+}
+
+.scrollbar-thumb-h:hover {
+    background: light-dark(#a0a0a0, #787878);
+}
+
 .statusbar {
     display: flex;
     justify-content: space-between;
@@ -793,5 +1085,116 @@ const CSS: &str = r#"
 
 .status-msg {
     opacity: 0.8;
+}
+
+.popup-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.popup {
+    background: light-dark(#ffffff, #252526);
+    border: 1px solid light-dark(#d4d4d4, #454545);
+    border-radius: 8px;
+    padding: 16px 20px;
+    min-width: 320px;
+    max-width: 500px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.popup-header {
+    font-size: 14px;
+    margin-bottom: 12px;
+    color: light-dark(#1e1e1e, #d4d4d4);
+}
+
+.popup-port {
+    color: #e5c07b;
+    font-weight: bold;
+}
+
+.popup-mode {
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+
+.popup-label {
+    color: light-dark(#858585, #858585);
+}
+
+.popup-mode-value {
+    color: #e5c07b;
+}
+
+.popup-hint {
+    font-size: 11px;
+    color: light-dark(#858585, #858585);
+    margin-bottom: 12px;
+}
+
+.popup-interfaces {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.popup-error {
+    color: #f44747;
+    font-size: 12px;
+}
+
+.popup-interface {
+    margin-bottom: 8px;
+}
+
+.popup-iface-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: #4ec9b0;
+    margin-bottom: 4px;
+}
+
+.popup-iface-name.default {
+    color: #6a9955;
+}
+
+.popup-addr {
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    font-family: 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+    font-size: 12px;
+    cursor: pointer;
+    border-radius: 4px;
+    margin-left: 8px;
+}
+
+.popup-addr:hover {
+    background: light-dark(#e8e8e8, #3c3c3c);
+}
+
+.popup-addr.selected {
+    background: light-dark(#007acc33, #007acc44);
+}
+
+.popup-addr.self-assigned {
+    opacity: 0.5;
+}
+
+.popup-addr-indicator {
+    color: #007acc;
+    margin-right: 4px;
+    width: 16px;
+}
+
+.popup-addr-text {
+    color: light-dark(#1e1e1e, #d4d4d4);
 }
 "#;
