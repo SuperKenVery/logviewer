@@ -297,6 +297,9 @@ impl GuiAppState {
         self.lines.push(line);
         if matches {
             self.filtered_indices.push(idx);
+            let current_total = self.line_offsets.last().copied().unwrap_or(0.0);
+            self.line_heights.push(LINE_HEIGHT);
+            self.line_offsets.push(current_total + LINE_HEIGHT);
         }
     }
 
@@ -905,7 +908,6 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                 span { class: "status-info",
                     "{filtered_count} / {total_lines} lines"
                     if follow_tail { " • Following" }
-                    " • h:{container_height:.0} scroll:{scroll_y:.0}/{max_scroll:.0}"
                 }
                 if let Some(msg) = status_message {
                     span { class: "status-msg", "{msg}" }
