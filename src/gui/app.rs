@@ -901,6 +901,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                             if s.wrap_lines {
                                 s.scroll_x = 0.0;
                             }
+                            s.reset_line_heights();
                             s.version += 1;
                             s.save_state();
                         },
@@ -1021,7 +1022,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                             for (filter_idx, line_idx, offset, line, content) in visible_lines {
                                 div {
                                     class: "log-line",
-                                    key: "{line_idx}",
+                                    key: "{line_idx}-{wrap_lines}",
                                     style: if wrap_lines {
                                         format!("position: absolute; top: {offset}px; left: 0; right: 0;")
                                     } else {
