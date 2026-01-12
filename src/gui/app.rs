@@ -12,6 +12,78 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+// =============================================================================
+// VIRTUAL SCROLLING IMPLEMENTATION
+// =============================================================================
+//
+// This module implements virtual scrolling to efficiently render large log files.
+// Instead of rendering all lines in the DOM (which would be slow for 100k+ lines),
+// we only render the lines currently visible in the viewport.
+//
+// ## Core Data Structures
+//
+// - `line_heights: Vec<f64>` - Stores the actual rendered height of each filtered line.
+//   Initially set to LINE_HEIGHT (20px), updated when lines are measured after mount.
+//
+// - `line_offsets: Vec<f64>` - Cumulative Y positions. `line_offsets[i]` is the pixel
+//   position where line `i` starts. Has length = filtered_count + 1, where the last
+//   element is the total content height.
+//
+// ## How It Works
+//
+// 1. **Finding visible lines**: Use binary search on `line_offsets` to find which
+//    lines intersect the current viewport (scroll_y to scroll_y + container_height).
+//
+// 2. **Rendering**: Only render the visible lines. Each line is absolutely positioned
+//    at its calculated Y offset from `line_offsets`.
+//
+// 3. **Height measurement**: When a line is first rendered, `onmounted` callback
+//    measures its actual height. If different from the stored height (e.g., line
+//    wraps to multiple visual lines), we update `line_heights` and rebuild offsets.
+//
+// 4. **Scroll handling**: Native browser scroll is used (`overflow-y: auto`).
+//    The `onscroll` event updates our scroll_y state. We only trigger re-renders
+//    when the visible line range changes, not on every scroll pixel.
+//
+// ## Key Design Decisions
+//
+// - **Absolute positioning**: Each line has `position: absolute; top: {offset}px`.
+//   This allows lines to have variable heights without affecting each other.
+//
+// - **Fixed container height**: The `.log-list` container has a fixed height equal
+//   to `total_height()` (sum of all line heights). This gives the scrollbar the
+//   correct size even though most lines aren't rendered.
+//
+// - **Native scroll**: We use the browser's native scrolling instead of manual
+//   scroll handling. This provides smooth scrolling, momentum, and accessibility.
+//
+// ## Pitfalls & Edge Cases
+//
+// 1. **Initial height estimation**: New lines start with LINE_HEIGHT (20px). If a
+//    line wraps, it will briefly overlap with the next line until `onmounted`
+//    measures the actual height and triggers a re-render.
+//
+// 2. **Height changes cause re-renders**: When `set_line_height` detects a height
+//    change, it increments `version` to trigger re-render. This can cause a brief
+//    visual jump as positions are recalculated.
+//
+// 3. **Filter changes reset heights**: When filters change, `rebuild_filtered_indices`
+//    calls `reset_line_heights`, resetting all heights to LINE_HEIGHT. Previously
+//    measured heights are lost and must be re-measured.
+//
+// 4. **Adding new lines**: `add_line` must update both `line_heights` and
+//    `line_offsets` when a new line matches the filter. Forgetting this causes
+//    new lines to not appear until a re-render is triggered elsewhere.
+//
+// 5. **Wrap mode complexity**: In wrap mode, line heights vary based on content
+//    length and container width. Resizing the window invalidates all measured
+//    heights (not currently handled - would need resize observer).
+//
+// 6. **Memory usage**: We store height/offset for every filtered line. For very
+//    large logs (millions of lines), this could use significant memory.
+//
+// =============================================================================
+
 const LINE_HEIGHT: f64 = 20.0;
 
 const BASE_RENDER_THRESHOLD_MS: f64 = 50.0;
