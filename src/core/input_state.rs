@@ -7,6 +7,7 @@ pub enum InputMode {
     HideEdit,
     FilterEdit,
     HighlightEdit,
+    LineStartEdit,
 }
 
 #[derive(Clone)]
@@ -14,6 +15,7 @@ pub struct InputFields {
     pub hide: TextInput,
     pub filter: TextInput,
     pub highlight: TextInput,
+    pub line_start: TextInput,
 }
 
 impl InputFields {
@@ -22,6 +24,7 @@ impl InputFields {
             hide: TextInput::new(state.hide_input.clone()),
             filter: TextInput::new(state.filter_input.clone()),
             highlight: TextInput::new(state.highlight_input.clone()),
+            line_start: TextInput::new(state.line_start_regex.clone()),
         }
     }
 
@@ -30,6 +33,7 @@ impl InputFields {
             InputMode::HideEdit => Some(&mut self.hide),
             InputMode::FilterEdit => Some(&mut self.filter),
             InputMode::HighlightEdit => Some(&mut self.highlight),
+            InputMode::LineStartEdit => Some(&mut self.line_start),
             InputMode::Normal => None,
         }
     }

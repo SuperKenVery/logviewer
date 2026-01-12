@@ -24,11 +24,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use fancy_regex::Regex;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use source::{start_source, LogSource, SourceEvent};
+use state::AppState;
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -73,7 +76,20 @@ fn run_tui(cli: Cli) -> Result<()> {
         LogSource::Stdin
     };
 
-    start_source(source, tx)?;
+    let state = AppState::load();
+    let line_start_regex = if state.line_start_regex.trim().is_empty() {
+        None
+    } else {
+        match Regex::new(&state.line_start_regex) {
+            Ok(re) => Some(Arc::new(re)),
+            Err(e) => {
+                eprintln!("Invalid line start regex: {}", e);
+                None
+            }
+        }
+    };
+
+    start_source(source, tx, line_start_regex)?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -198,6 +214,7 @@ fn handle_normal_mode(
         KeyCode::Char('d') => app.input_mode = InputMode::HideEdit,
         KeyCode::Char('f') => app.input_mode = InputMode::FilterEdit,
         KeyCode::Char('h') => app.input_mode = InputMode::HighlightEdit,
+        KeyCode::Char('s') => app.input_mode = InputMode::LineStartEdit,
         KeyCode::Char('c') => app.clear(),
         KeyCode::Char('t') => app.toggle_time(),
         KeyCode::Char('w') => app.toggle_wrap(),

@@ -7,6 +7,7 @@ use async_channel::Receiver;
 use dioxus::html::MountedData;
 use dioxus::prelude::*;
 use std::rc::Rc;
+use std::sync::Arc;
 use fancy_regex::Regex;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -101,8 +102,10 @@ pub struct GuiAppState {
     pub hide_text: String,
     pub filter_text: String,
     pub highlight_text: String,
+    pub line_start_text: String,
     pub hide_error: Option<String>,
     pub filter_error: Option<String>,
+    pub line_start_error: Option<String>,
     pub status_message: Option<String>,
     pub is_connected: bool,
     pub scroll_y: f64,
@@ -128,8 +131,10 @@ impl GuiAppState {
             hide_text: state.hide_input.clone(),
             filter_text: state.filter_input.clone(),
             highlight_text: state.highlight_input.clone(),
+            line_start_text: state.line_start_regex.clone(),
             hide_error: None,
             filter_error: None,
+            line_start_error: None,
             status_message: None,
             is_connected: false,
             scroll_y: 0.0,
@@ -289,6 +294,7 @@ impl GuiAppState {
             filter_input: self.filter_text.clone(),
             highlight_input: self.highlight_text.clone(),
             wrap_lines: self.wrap_lines,
+            line_start_regex: self.line_start_text.clone(),
         };
         state.save();
     }
@@ -352,6 +358,24 @@ impl GuiAppState {
         }
         self.version += 1;
         self.save_state();
+    }
+
+    pub fn apply_line_start(&mut self) {
+        if self.line_start_text.trim().is_empty() {
+            self.line_start_error = None;
+        } else {
+            match Regex::new(&self.line_start_text) {
+                Ok(_) => {
+                    self.line_start_error = None;
+                }
+                Err(e) => {
+                    self.line_start_error = Some(e.to_string());
+                    return;
+                }
+            }
+        }
+        self.save_state();
+        self.status_message = Some("Line start regex saved. Restart to apply.".to_string());
     }
 
     pub fn add_line(&mut self, content: String) {
@@ -605,7 +629,17 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                 LogSource::Stdin
             };
 
-            if let Err(e) = start_source(source, sync_tx) {
+            let state = AppState::load();
+            let line_start_regex = if state.line_start_regex.trim().is_empty() {
+                None
+            } else {
+                match Regex::new(&state.line_start_regex) {
+                    Ok(re) => Some(Arc::new(re)),
+                    Err(_) => None,
+                }
+            };
+
+            if let Err(e) = start_source(source, sync_tx, line_start_regex) {
                 app_state.write().status_message = Some(format!("Failed to start source: {}", e));
             } else {
                 source_rx.set(Some(async_rx));
@@ -743,6 +777,8 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
     let highlight_text = state.highlight_text.clone();
     let hide_error = state.hide_error.clone();
     let filter_error = state.filter_error.clone();
+    let line_start_text = state.line_start_text.clone();
+    let line_start_error = state.line_start_error.clone();
     let status_message = state.status_message.clone();
     let is_connected = state.is_connected;
     let highlight_expr = state.filter_state.highlight_expr.clone();
@@ -828,6 +864,21 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                         onkeydown: move |e| {
                             if e.key() == Key::Enter {
                                 app_state.write().apply_highlight();
+                            }
+                        },
+                    }
+                }
+                div { class: "filter-group",
+                    label { "Line Start:" }
+                    input {
+                        r#type: "text",
+                        class: if line_start_error.is_some() { "error" } else { "" },
+                        placeholder: "regex for log line start...",
+                        value: "{line_start_text}",
+                        oninput: move |e| app_state.write().line_start_text = e.value(),
+                        onkeydown: move |e| {
+                            if e.key() == Key::Enter {
+                                app_state.write().apply_line_start();
                             }
                         },
                     }

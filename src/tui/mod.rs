@@ -20,6 +20,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(INPUT_FIELD_HEIGHT),
             Constraint::Length(INPUT_FIELD_HEIGHT),
             Constraint::Length(INPUT_FIELD_HEIGHT),
+            Constraint::Length(INPUT_FIELD_HEIGHT),
             Constraint::Min(1),
             Constraint::Length(STATUS_BAR_HEIGHT),
         ])
@@ -46,8 +47,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         " Highlight (h) ",
         app.input_mode == InputMode::HighlightEdit,
     );
-    draw_log_view(frame, app, chunks[3]);
-    draw_status_bar(frame, app, chunks[4]);
+    draw_text_input(
+        frame,
+        &app.input_fields.line_start,
+        chunks[3],
+        " Line Start (s) ",
+        app.input_mode == InputMode::LineStartEdit,
+    );
+    draw_log_view(frame, app, chunks[4]);
+    draw_status_bar(frame, app, chunks[5]);
 
     if app.input_mode != InputMode::Normal {
         draw_help_popup(frame);
@@ -244,7 +252,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         msg.clone()
     } else {
         format!(
-            "q:Quit d:Hide f:Filter h:Highlight c:Clear t:Time({}) w:Wrap({})",
+            "q:Quit d:Hide f:Filter h:Highlight s:LineStart c:Clear t:Time({}) w:Wrap({})",
             if app.show_time { "ON" } else { "OFF" },
             if app.wrap_lines { "ON" } else { "OFF" }
         )

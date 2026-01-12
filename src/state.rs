@@ -11,6 +11,8 @@ pub struct AppState {
     pub highlight_input: String,
     #[serde(default = "default_wrap_lines")]
     pub wrap_lines: bool,
+    #[serde(default)]
+    pub line_start_regex: String,
 }
 
 fn default_wrap_lines() -> bool {
@@ -24,6 +26,7 @@ impl Default for AppState {
             filter_input: String::new(),
             highlight_input: String::new(),
             wrap_lines: true,
+            line_start_regex: String::new(),
         }
     }
 }

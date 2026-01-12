@@ -103,6 +103,12 @@ impl App {
                     self.input_mode = InputMode::Normal;
                 }
             }
+            InputMode::LineStartEdit => {
+                self.apply_line_start();
+                if !self.input_fields.line_start.has_error() {
+                    self.input_mode = InputMode::Normal;
+                }
+            }
             InputMode::Normal => {}
         }
     }
@@ -190,6 +196,7 @@ impl App {
             filter_input: self.input_fields.filter.text.clone(),
             highlight_input: self.input_fields.highlight.text.clone(),
             wrap_lines: self.wrap_lines,
+            line_start_regex: self.input_fields.line_start.text.clone(),
         };
         state.save();
     }
@@ -250,6 +257,24 @@ impl App {
             }
         }
         self.save_state();
+    }
+
+    pub fn apply_line_start(&mut self) {
+        if self.input_fields.line_start.is_empty() {
+            self.input_fields.line_start.clear_error();
+        } else {
+            match Regex::new(&self.input_fields.line_start.text) {
+                Ok(_) => {
+                    self.input_fields.line_start.clear_error();
+                }
+                Err(e) => {
+                    self.input_fields.line_start.set_error(Some(e.to_string()));
+                    return;
+                }
+            }
+        }
+        self.save_state();
+        self.status_message = Some("Line start regex saved. Restart to apply.".to_string());
     }
 
     fn rebuild_filtered_indices(&mut self) {

@@ -1,10 +1,12 @@
 use anyhow::Result;
+use fancy_regex::Regex;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -21,36 +23,87 @@ pub enum SourceEvent {
     Disconnected(String),
 }
 
-pub fn start_source(source: LogSource, tx: Sender<SourceEvent>) -> Result<()> {
+pub fn start_source(source: LogSource, tx: Sender<SourceEvent>, line_start_regex: Option<Arc<Regex>>) -> Result<()> {
     match source {
-        LogSource::File(path) => start_file_source(path, tx),
-        LogSource::Stdin => start_stdin_source(tx),
-        LogSource::Network(port) => start_network_source(port, tx),
+        LogSource::File(path) => start_file_source(path, tx, line_start_regex),
+        LogSource::Stdin => start_stdin_source(tx, line_start_regex),
+        LogSource::Network(port) => start_network_source(port, tx, line_start_regex),
     }
 }
 
-fn start_file_source(path: PathBuf, tx: Sender<SourceEvent>) -> Result<()> {
+fn start_file_source(path: PathBuf, tx: Sender<SourceEvent>, line_start_regex: Option<Arc<Regex>>) -> Result<()> {
     let path_clone = path.clone();
     thread::spawn(move || {
-        if let Err(e) = run_file_source(path_clone, tx.clone()) {
+        if let Err(e) = run_file_source(path_clone, tx.clone(), line_start_regex) {
             let _ = tx.send(SourceEvent::Error(e.to_string()));
         }
     });
     Ok(())
 }
 
-fn run_file_source(path: PathBuf, tx: Sender<SourceEvent>) -> Result<()> {
+struct MultilineAggregator {
+    regex: Option<Arc<Regex>>,
+    pending: Option<String>,
+}
+
+impl MultilineAggregator {
+    fn new(regex: Option<Arc<Regex>>) -> Self {
+        Self { regex, pending: None }
+    }
+
+    fn process_line(&mut self, line: &str, tx: &Sender<SourceEvent>) -> bool {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        match &self.regex {
+            None => {
+                if tx.send(SourceEvent::Line(trimmed.to_string())).is_err() {
+                    return false;
+                }
+            }
+            Some(re) => {
+                let is_start = re.is_match(trimmed).unwrap_or(false);
+                if is_start {
+                    if let Some(pending) = self.pending.take() {
+                        if tx.send(SourceEvent::Line(pending)).is_err() {
+                            return false;
+                        }
+                    }
+                    self.pending = Some(trimmed.to_string());
+                } else {
+                    match &mut self.pending {
+                        Some(p) => {
+                            p.push('\n');
+                            p.push_str(trimmed);
+                        }
+                        None => {
+                            self.pending = Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn flush(&mut self, tx: &Sender<SourceEvent>) {
+        if let Some(pending) = self.pending.take() {
+            let _ = tx.send(SourceEvent::Line(pending));
+        }
+    }
+}
+
+fn run_file_source(path: PathBuf, tx: Sender<SourceEvent>, line_start_regex: Option<Arc<Regex>>) -> Result<()> {
     let mut file = File::open(&path)?;
     let mut reader = BufReader::new(&file);
     let mut line = String::new();
+    let mut aggregator = MultilineAggregator::new(line_start_regex);
 
     while reader.read_line(&mut line)? > 0 {
-        let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
-        if tx.send(SourceEvent::Line(trimmed)).is_err() {
+        if !aggregator.process_line(&line, &tx) {
             return Ok(());
         }
         line.clear();
     }
+    aggregator.flush(&tx);
 
     let mut pos = file.seek(SeekFrom::Current(0))?;
 
@@ -72,8 +125,7 @@ fn run_file_source(path: PathBuf, tx: Sender<SourceEvent>) -> Result<()> {
                 reader = BufReader::new(&file);
 
                 while reader.read_line(&mut line)? > 0 {
-                    let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
-                    if tx.send(SourceEvent::Line(trimmed)).is_err() {
+                    if !aggregator.process_line(&line, &tx) {
                         return Ok(());
                     }
                     line.clear();
@@ -83,19 +135,23 @@ fn run_file_source(path: PathBuf, tx: Sender<SourceEvent>) -> Result<()> {
             Ok(Err(e)) => {
                 let _ = tx.send(SourceEvent::Error(e.to_string()));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                aggregator.flush(&tx);
+                return Ok(());
+            }
         }
     }
 }
 
-fn start_stdin_source(tx: Sender<SourceEvent>) -> Result<()> {
+fn start_stdin_source(tx: Sender<SourceEvent>, line_start_regex: Option<Arc<Regex>>) -> Result<()> {
     thread::spawn(move || {
         let stdin = std::io::stdin();
         let reader = BufReader::new(stdin.lock());
+        let mut aggregator = MultilineAggregator::new(line_start_regex);
         for line in reader.lines() {
             match line {
                 Ok(l) => {
-                    if tx.send(SourceEvent::Line(l)).is_err() {
+                    if !aggregator.process_line(&l, &tx) {
                         break;
                     }
                 }
@@ -105,11 +161,12 @@ fn start_stdin_source(tx: Sender<SourceEvent>) -> Result<()> {
                 }
             }
         }
+        aggregator.flush(&tx);
     });
     Ok(())
 }
 
-fn start_network_source(port: u16, tx: Sender<SourceEvent>) -> Result<()> {
+fn start_network_source(port: u16, tx: Sender<SourceEvent>, line_start_regex: Option<Arc<Regex>>) -> Result<()> {
     let listener = TcpListener::bind(format!("[::]:{}", port))
         .or_else(|_| TcpListener::bind(format!("0.0.0.0:{}", port)))?;
     thread::spawn(move || {
@@ -117,7 +174,8 @@ fn start_network_source(port: u16, tx: Sender<SourceEvent>) -> Result<()> {
             match stream {
                 Ok(s) => {
                     let tx_clone = tx.clone();
-                    thread::spawn(move || handle_client(s, tx_clone));
+                    let regex_clone = line_start_regex.clone();
+                    thread::spawn(move || handle_client(s, tx_clone, regex_clone));
                 }
                 Err(e) => {
                     let _ = tx.send(SourceEvent::Error(format!("Accept error: {}", e)));
@@ -128,7 +186,7 @@ fn start_network_source(port: u16, tx: Sender<SourceEvent>) -> Result<()> {
     Ok(())
 }
 
-fn handle_client(stream: TcpStream, tx: Sender<SourceEvent>) {
+fn handle_client(stream: TcpStream, tx: Sender<SourceEvent>, line_start_regex: Option<Arc<Regex>>) {
     let peer = stream
         .peer_addr()
         .map(|a| a.to_string())
@@ -137,10 +195,11 @@ fn handle_client(stream: TcpStream, tx: Sender<SourceEvent>) {
     let _ = tx.send(SourceEvent::Line(format!("[connected: {}]", peer)));
 
     let reader = BufReader::new(&stream);
+    let mut aggregator = MultilineAggregator::new(line_start_regex);
     for line in reader.lines() {
         match line {
             Ok(l) => {
-                if tx.send(SourceEvent::Line(l)).is_err() {
+                if !aggregator.process_line(&l, &tx) {
                     break;
                 }
             }
@@ -150,6 +209,7 @@ fn handle_client(stream: TcpStream, tx: Sender<SourceEvent>) {
             }
         }
     }
+    aggregator.flush(&tx);
     let _ = tx.send(SourceEvent::Line(format!("[disconnected: {}]", peer)));
     let _ = tx.send(SourceEvent::Disconnected(peer));
 }
