@@ -2,6 +2,7 @@ mod app;
 mod constants;
 mod core;
 mod filter;
+mod gpui_app;
 #[cfg(feature = "gui")]
 mod gui;
 mod highlight;
@@ -51,10 +52,18 @@ struct Cli {
     #[cfg(feature = "gui")]
     #[arg(long = "tui", help = "Use TUI instead of GUI")]
     tui: bool,
+
+    #[arg(long = "gpui", help = "Use GPUI implementation")]
+    gpui: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.gpui {
+        gpui_app::run(cli.file, cli.port);
+        return Ok(());
+    }
 
     #[cfg(feature = "gui")]
     if !cli.tui {
