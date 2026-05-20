@@ -128,7 +128,12 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                         Some(ch) if ch == quote => break,
                         Some('\\') => {
                             if let Some(escaped) = chars.next() {
-                                pattern.push(escaped);
+                                if escaped == quote || escaped == '\\' {
+                                    pattern.push(escaped);
+                                } else {
+                                    pattern.push('\\');
+                                    pattern.push(escaped);
+                                }
                             }
                         }
                         Some(ch) => pattern.push(ch),
@@ -256,5 +261,15 @@ mod tests {
         assert!(filter.matches("error debug"));
         assert!(!filter.matches("error in debug mode"));
         assert!(!filter.matches("debug mode error"));
+    }
+
+    #[test]
+    fn test_quoted_backslash_preserved() {
+        // \[ and \] should be passed through to regex as literal bracket matchers
+        let filter = parse_filter(r#""\[judgeSubagents\]""#).unwrap();
+        assert!(filter.matches("foo [judgeSubagents] bar"));
+        assert!(!filter.matches("foo judgeSubagents bar"));
+        // Should NOT match single chars from a character class
+        assert!(!filter.matches("info updated tcc config"));
     }
 }

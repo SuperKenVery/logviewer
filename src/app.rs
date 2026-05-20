@@ -241,11 +241,12 @@ impl App {
                 line.content.clone()
             }
         };
+        let enable_highlight = content.len() <= 500;
         let spans = highlight_line(
             &content,
-            self.filter_state.highlight_expr.as_ref(),
-            true,
-            true,
+            if enable_highlight { self.filter_state.highlight_expr.as_ref() } else { None },
+            enable_highlight,
+            enable_highlight,
         );
         apply_highlights_ratatui(&content, &spans)
     }

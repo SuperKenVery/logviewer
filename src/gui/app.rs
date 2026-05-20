@@ -33,6 +33,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
     let mut container_element: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut listen_state = use_signal(|| ListenState::new(props.port));
     let mut pending_scroll_to_bottom = use_signal(|| false);
+    let mut pending_scroll_to_top = use_signal(|| false);
 
     use_effect({
         let file = props.file.clone();
@@ -189,6 +190,13 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
 
     use_future(move || async move {
         loop {
+            if *pending_scroll_to_top.read() {
+                pending_scroll_to_top.set(false);
+                if let Some(ref el) = *container_element.read() {
+                    let coords = dioxus::html::geometry::PixelsVector2D::new(0.0, 0.0);
+                    let _ = el.scroll(coords, ScrollBehavior::Instant).await;
+                }
+            }
             if *pending_scroll_to_bottom.read() {
                 pending_scroll_to_bottom.set(false);
                 if let Some(ref el) = *container_element.read() {
@@ -266,6 +274,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                     label { "Hide:" }
                     input {
                         r#type: "text",
+                        spellcheck: "false",
                         class: if hide_error.is_some() { "error" } else { "" },
                         placeholder: "regex to hide...",
                         value: "{hide_text}",
@@ -273,6 +282,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                         onkeydown: move |e| {
                             if e.key() == Key::Enter {
                                 app_state.write().apply_hide();
+                                pending_scroll_to_top.set(true);
                             }
                         },
                     }
@@ -281,6 +291,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                     label { "Filter:" }
                     input {
                         r#type: "text",
+                        spellcheck: "false",
                         class: if filter_error.is_some() { "error" } else { "" },
                         placeholder: "filter expression...",
                         value: "{filter_text}",
@@ -288,6 +299,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                         onkeydown: move |e| {
                             if e.key() == Key::Enter {
                                 app_state.write().apply_filter();
+                                pending_scroll_to_top.set(true);
                             }
                         },
                     }
@@ -296,6 +308,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                     label { "Highlight:" }
                     input {
                         r#type: "text",
+                        spellcheck: "false",
                         placeholder: "highlight expression...",
                         value: "{highlight_text}",
                         oninput: move |e| app_state.write().highlight_text = e.value(),
@@ -310,6 +323,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                     label { "Line Start:" }
                     input {
                         r#type: "text",
+                        spellcheck: "false",
                         class: if line_start_error.is_some() { "error" } else { "" },
                         placeholder: "regex for log line start...",
                         value: "{line_start_text}",
@@ -461,7 +475,7 @@ pub fn GuiApp(props: GuiAppProps) -> Element {
                             for (filter_idx, line_idx, offset, line, content) in visible_lines {
                                 div {
                                     class: "log-line",
-                                    key: "{line_idx}-{wrap_lines}",
+                                    key: "{line_idx}-{version}-{wrap_lines}",
                                     style: if wrap_lines {
                                         format!("position: absolute; top: {offset}px; left: 0; right: 0;")
                                     } else {

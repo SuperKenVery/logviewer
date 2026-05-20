@@ -7,7 +7,13 @@ use fancy_regex::Regex;
 const LINE_HEIGHT: f64 = 20.0;
 
 pub fn highlight_content(content: &str, highlight_expr: &Option<FilterExpr>) -> Vec<(String, HighlightStyle)> {
-    let spans = highlight_line(content, highlight_expr.as_ref(), true, true);
+    let enable_highlight = content.len() <= 500;
+    let spans = highlight_line(
+        content,
+        if enable_highlight { highlight_expr.as_ref() } else { None },
+        enable_highlight,
+        enable_highlight,
+    );
     apply_highlights(content, &spans)
 }
 
@@ -103,7 +109,8 @@ impl GuiAppState {
             }
         }
         self.reset_line_heights();
-        self.clamp_scroll();
+        self.scroll_y = 0.0;
+        self.scroll_x = 0.0;
         self.version += 1;
     }
 
